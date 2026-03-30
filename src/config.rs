@@ -45,6 +45,56 @@ pub struct TradingConfig {
     pub categories_allowlist: Vec<String>,
     pub max_open_orders: u32,
     pub max_markets_active: u32,
+    #[serde(default = "default_rescan_interval")]
+    pub market_rescan_interval_mins: u32,
+    #[serde(default = "default_min_expiry_hours")]
+    pub min_time_to_expiry_hours: f64,
+    #[serde(default = "default_max_expiry_hours")]
+    pub max_time_to_expiry_hours: f64,
+    #[serde(default)]
+    pub min_volume_24h: f64,
+    #[serde(default)]
+    pub market_score_weights: MarketScoreWeights,
+}
+
+fn default_rescan_interval() -> u32 { 15 }
+fn default_min_expiry_hours() -> f64 { 2.0 }
+fn default_max_expiry_hours() -> f64 { 168.0 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MarketScoreWeights {
+    #[serde(default = "default_w_volume")]
+    pub volume: f64,
+    #[serde(default = "default_w_spread")]
+    pub spread: f64,
+    #[serde(default = "default_w_oi")]
+    pub open_interest: f64,
+    #[serde(default = "default_w_expiry")]
+    pub expiry: f64,
+    #[serde(default = "default_w_edge")]
+    pub edge: f64,
+    #[serde(default = "default_w_price")]
+    pub price_centrality: f64,
+}
+
+fn default_w_volume() -> f64 { 0.25 }
+fn default_w_spread() -> f64 { 0.20 }
+fn default_w_oi() -> f64 { 0.15 }
+fn default_w_expiry() -> f64 { 0.15 }
+fn default_w_edge() -> f64 { 0.15 }
+fn default_w_price() -> f64 { 0.10 }
+
+impl Default for MarketScoreWeights {
+    fn default() -> Self {
+        Self {
+            volume: default_w_volume(),
+            spread: default_w_spread(),
+            open_interest: default_w_oi(),
+            expiry: default_w_expiry(),
+            edge: default_w_edge(),
+            price_centrality: default_w_price(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -62,7 +112,32 @@ pub struct StrategyConfig {
     pub trade_sign_alpha: Decimal,
     pub inventory_penalty_k1: Decimal,
     pub inventory_penalty_k3: Decimal,
+    #[serde(default = "default_inv_spread_scale")]
+    pub inv_spread_scale: Decimal,
+    #[serde(default = "default_inv_skew_scale")]
+    pub inv_skew_scale: Decimal,
+    #[serde(default = "default_vol_baseline_spread")]
+    pub vol_baseline_spread: Decimal,
+    #[serde(default = "default_expiry_widen_coeff")]
+    pub expiry_widen_coeff: Decimal,
+    #[serde(default = "default_expiry_widen_threshold_hours")]
+    pub expiry_widen_threshold_hours: f64,
+    #[serde(default = "default_event_half_spread_mult")]
+    pub event_half_spread_multiplier: Decimal,
+    #[serde(default = "default_event_threshold")]
+    pub event_threshold: Decimal,
+    #[serde(default = "default_event_decay_secs")]
+    pub event_decay_seconds: u64,
 }
+
+fn default_inv_spread_scale() -> Decimal { Decimal::new(1, 1) }      // 0.1
+fn default_inv_skew_scale() -> Decimal { Decimal::new(1, 2) }        // 0.01
+fn default_vol_baseline_spread() -> Decimal { Decimal::new(2, 2) }   // 0.02
+fn default_expiry_widen_coeff() -> Decimal { Decimal::new(1, 2) }    // 0.01
+fn default_expiry_widen_threshold_hours() -> f64 { 4.0 }
+fn default_event_half_spread_mult() -> Decimal { Decimal::new(3, 0) } // 3x
+fn default_event_threshold() -> Decimal { Decimal::new(5, 2) }        // 0.05
+fn default_event_decay_secs() -> u64 { 30 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RiskConfig {
@@ -74,7 +149,17 @@ pub struct RiskConfig {
     pub cancel_all_on_disconnect: bool,
     pub disconnect_timeout_secs: u64,
     pub seq_gap_timeout_secs: u64,
+    #[serde(default = "default_max_capital_per_market")]
+    pub max_capital_per_market: Decimal,
+    #[serde(default = "default_max_portfolio_utilization")]
+    pub max_portfolio_utilization: Decimal,
+    #[serde(default = "default_max_fair_deviation")]
+    pub max_fair_deviation: Decimal,
 }
+
+fn default_max_capital_per_market() -> Decimal { Decimal::new(1000, 2) } // $10
+fn default_max_portfolio_utilization() -> Decimal { Decimal::new(50, 2) } // 0.50
+fn default_max_fair_deviation() -> Decimal { Decimal::new(10, 2) }       // 0.10
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {

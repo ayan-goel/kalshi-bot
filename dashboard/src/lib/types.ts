@@ -37,6 +37,11 @@ export interface MarketSummary {
   best_bid: string | null;
   best_ask: string | null;
   position: PositionSummary | null;
+  score: number | null;
+  event_ticker: string | null;
+  category: string | null;
+  hours_to_expiry: number | null;
+  volume_24h: number | null;
 }
 
 export interface MarketDetail {
@@ -143,6 +148,14 @@ export interface StrategyConfig {
   trade_sign_alpha: string;
   inventory_penalty_k1: string;
   inventory_penalty_k3: string;
+  inv_spread_scale: string;
+  inv_skew_scale: string;
+  vol_baseline_spread: string;
+  expiry_widen_coeff: string;
+  expiry_widen_threshold_hours: number;
+  event_half_spread_multiplier: string;
+  event_threshold: string;
+  event_decay_seconds: number;
 }
 
 export interface RiskConfig {
@@ -154,6 +167,9 @@ export interface RiskConfig {
   cancel_all_on_disconnect: boolean;
   disconnect_timeout_secs: number;
   seq_gap_timeout_secs: number;
+  max_capital_per_market: string;
+  max_portfolio_utilization: string;
+  max_fair_deviation: string;
 }
 
 export interface TradingConfig {
@@ -162,6 +178,10 @@ export interface TradingConfig {
   categories_allowlist: string[];
   max_open_orders: number;
   max_markets_active: number;
+  market_rescan_interval_mins: number;
+  min_time_to_expiry_hours: number;
+  max_time_to_expiry_hours: number;
+  min_volume_24h: number;
 }
 
 export interface BotConfig {

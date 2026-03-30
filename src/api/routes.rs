@@ -291,6 +291,11 @@ struct MarketSummary {
     best_bid: Option<String>,
     best_ask: Option<String>,
     position: Option<PositionSummary>,
+    score: Option<f64>,
+    event_ticker: Option<String>,
+    category: Option<String>,
+    hours_to_expiry: Option<f64>,
+    volume_24h: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -313,6 +318,7 @@ pub async fn get_markets(State(state): State<AppState>) -> impl IntoResponse {
                 net_inventory: p.net_inventory().to_string(),
                 realized_pnl: p.realized_pnl.to_string(),
             });
+            let meta = engine.get_market_meta(ticker);
             MarketSummary {
                 ticker: ticker.0.clone(),
                 mid: book.mid().map(|d| d.to_string()),
@@ -320,6 +326,11 @@ pub async fn get_markets(State(state): State<AppState>) -> impl IntoResponse {
                 best_bid: book.best_yes_bid().map(|d| d.price.to_string()),
                 best_ask: book.implied_yes_ask().map(|d| d.to_string()),
                 position: pos,
+                score: meta.map(|m| m.score),
+                event_ticker: meta.and_then(|m| m.event_ticker.clone()),
+                category: meta.and_then(|m| m.category.clone()),
+                hours_to_expiry: meta.map(|m| m.hours_to_expiry()),
+                volume_24h: meta.map(|m| m.volume_24h),
             }
         })
         .collect();

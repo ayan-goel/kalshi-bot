@@ -276,6 +276,86 @@ impl KalshiRestClient {
         Ok(data.markets)
     }
 
+    /// Fetch ALL markets matching filters using cursor-based pagination.
+    #[instrument(skip(self))]
+    pub async fn get_all_markets(
+        &self,
+        status: Option<&str>,
+        event_ticker: Option<&str>,
+        series_ticker: Option<&str>,
+    ) -> Result<Vec<MarketResponse>> {
+        let mut all_markets = Vec::new();
+        let mut cursor: Option<String> = None;
+        let page_size = 1000;
+
+        loop {
+            let mut path = format!("/markets?limit={page_size}&mve_filter=exclude");
+            if let Some(s) = status {
+                path.push_str(&format!("&status={s}"));
+            }
+            if let Some(et) = event_ticker {
+                path.push_str(&format!("&event_ticker={et}"));
+            }
+            if let Some(st) = series_ticker {
+                path.push_str(&format!("&series_ticker={st}"));
+            }
+            if let Some(ref c) = cursor {
+                path.push_str(&format!("&cursor={c}"));
+            }
+
+            let resp = self.get(&path).await?;
+            let data: MarketsListResponse = resp.json().await?;
+            let count = data.markets.len();
+            all_markets.extend(data.markets);
+
+            match data.cursor {
+                Some(c) if !c.is_empty() && count == page_size as usize => {
+                    cursor = Some(c);
+                }
+                _ => break,
+            }
+        }
+
+        Ok(all_markets)
+    }
+
+    /// Fetch markets for a specific event (siblings).
+    #[instrument(skip(self))]
+    pub async fn get_markets_for_event(&self, event_ticker: &str) -> Result<Vec<MarketResponse>> {
+        self.get_all_markets(Some("open"), Some(event_ticker), None).await
+    }
+
+    /// Fetch events with optional nested markets.
+    #[instrument(skip(self))]
+    pub async fn get_events(&self, with_markets: bool) -> Result<Vec<EventResponse>> {
+        let mut all_events = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let mut path = format!("/events?limit=200");
+            if with_markets {
+                path.push_str("&with_nested_markets=true");
+            }
+            if let Some(ref c) = cursor {
+                path.push_str(&format!("&cursor={c}"));
+            }
+
+            let resp = self.get(&path).await?;
+            let data: EventsListResponse = resp.json().await?;
+            let count = data.events.len();
+            all_events.extend(data.events);
+
+            match data.cursor {
+                Some(c) if !c.is_empty() && count == 200 => {
+                    cursor = Some(c);
+                }
+                _ => break,
+            }
+        }
+
+        Ok(all_events)
+    }
+
     #[instrument(skip(self))]
     pub async fn get_orderbook(&self, market_ticker: &str) -> Result<OrderbookDataFp> {
         let resp = self

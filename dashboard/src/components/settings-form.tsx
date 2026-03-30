@@ -84,6 +84,14 @@ function StrategyForm({ initial }: { initial: StrategyConfig }) {
     { key: "trade_sign_alpha", label: "Trade Sign Alpha", type: "text" },
     { key: "inventory_penalty_k1", label: "Inventory Penalty k1", type: "text" },
     { key: "inventory_penalty_k3", label: "Inventory Penalty k3", type: "text" },
+    { key: "inv_spread_scale", label: "Inv Spread Scale", type: "text" },
+    { key: "inv_skew_scale", label: "Inv Skew Scale", type: "text" },
+    { key: "vol_baseline_spread", label: "Vol Baseline Spread", type: "text" },
+    { key: "expiry_widen_coeff", label: "Expiry Widen Coeff", type: "text" },
+    { key: "expiry_widen_threshold_hours", label: "Expiry Widen Threshold (h)", type: "number" },
+    { key: "event_half_spread_multiplier", label: "Event Spread Multiplier", type: "text" },
+    { key: "event_threshold", label: "Event Threshold", type: "text" },
+    { key: "event_decay_seconds", label: "Event Decay (s)", type: "number" },
   ];
 
   return (
@@ -150,6 +158,15 @@ function RiskForm({ initial }: { initial: RiskConfig }) {
         </FormField>
         <FormField label="Max Open Orders">
           <Input type="number" value={values.max_open_orders} onChange={(e) => update("max_open_orders", Number(e.target.value))} className={inputClass} />
+        </FormField>
+        <FormField label="Max Capital Per Market">
+          <Input value={values.max_capital_per_market} onChange={(e) => update("max_capital_per_market", e.target.value)} className={inputClass} />
+        </FormField>
+        <FormField label="Max Portfolio Utilization">
+          <Input value={values.max_portfolio_utilization} onChange={(e) => update("max_portfolio_utilization", e.target.value)} className={inputClass} />
+        </FormField>
+        <FormField label="Max Fair Deviation">
+          <Input value={values.max_fair_deviation} onChange={(e) => update("max_fair_deviation", e.target.value)} className={inputClass} />
         </FormField>
         <FormField label="Disconnect Timeout (s)">
           <Input type="number" value={values.disconnect_timeout_secs} onChange={(e) => update("disconnect_timeout_secs", Number(e.target.value))} className={inputClass} />
@@ -241,6 +258,18 @@ function TradingForm({ initial }: { initial: TradingConfig }) {
           </FormField>
           <FormField label="Max Markets Active">
             <Input type="number" value={values.max_markets_active} onChange={(e) => update("max_markets_active", Number(e.target.value))} className={inputClass} />
+          </FormField>
+          <FormField label="Rescan Interval (mins)">
+            <Input type="number" value={values.market_rescan_interval_mins} onChange={(e) => update("market_rescan_interval_mins", Number(e.target.value))} className={inputClass} />
+          </FormField>
+          <FormField label="Min Expiry (hours)">
+            <Input type="number" value={values.min_time_to_expiry_hours} onChange={(e) => update("min_time_to_expiry_hours", Number(e.target.value))} className={inputClass} />
+          </FormField>
+          <FormField label="Max Expiry (hours)">
+            <Input type="number" value={values.max_time_to_expiry_hours} onChange={(e) => update("max_time_to_expiry_hours", Number(e.target.value))} className={inputClass} />
+          </FormField>
+          <FormField label="Min Volume 24h">
+            <Input type="number" value={values.min_volume_24h} onChange={(e) => update("min_volume_24h", Number(e.target.value))} className={inputClass} />
           </FormField>
         </div>
       </div>

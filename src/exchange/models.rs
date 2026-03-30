@@ -9,19 +9,88 @@ pub struct BalanceResponse {
     pub portfolio_value: i64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MarketPriceRange {
+    pub start: String,
+    pub end: String,
+    pub step: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketResponse {
     pub ticker: String,
+    #[serde(default)]
     pub event_ticker: Option<String>,
+    #[serde(default)]
     pub series_ticker: Option<String>,
+    #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
     pub category: Option<String>,
+    #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub market_type: Option<String>,
+    #[serde(default)]
+    pub yes_sub_title: Option<String>,
+    #[serde(default)]
+    pub no_sub_title: Option<String>,
+    #[serde(default)]
+    pub open_time: Option<String>,
+    #[serde(default)]
+    pub close_time: Option<String>,
+    #[serde(default)]
+    pub latest_expiration_time: Option<String>,
+    #[serde(default)]
     pub expiration_time: Option<String>,
+    #[serde(default)]
+    pub expected_expiration_time: Option<String>,
+    #[serde(default)]
+    pub yes_bid_dollars: Option<String>,
+    #[serde(default)]
+    pub yes_ask_dollars: Option<String>,
+    #[serde(default)]
+    pub no_bid_dollars: Option<String>,
+    #[serde(default)]
+    pub no_ask_dollars: Option<String>,
+    #[serde(default)]
+    pub yes_bid_size_fp: Option<String>,
+    #[serde(default)]
+    pub yes_ask_size_fp: Option<String>,
+    #[serde(default)]
+    pub last_price_dollars: Option<String>,
+    #[serde(default)]
+    pub previous_yes_bid_dollars: Option<String>,
+    #[serde(default)]
+    pub previous_yes_ask_dollars: Option<String>,
+    #[serde(default)]
+    pub previous_price_dollars: Option<String>,
+    #[serde(default)]
+    pub volume_fp: Option<String>,
+    #[serde(default)]
+    pub volume_24h_fp: Option<String>,
+    #[serde(default)]
+    pub open_interest_fp: Option<String>,
+    #[serde(default)]
+    pub notional_value_dollars: Option<String>,
+    #[serde(default)]
+    pub liquidity_dollars: Option<String>,
     #[serde(default)]
     pub price_level_structure: Option<String>,
     #[serde(default)]
+    pub price_ranges: Option<Vec<MarketPriceRange>>,
+    #[serde(default)]
     pub fractional_trading_enabled: Option<bool>,
+    #[serde(default)]
+    pub can_close_early: Option<bool>,
+    #[serde(default)]
+    pub is_provisional: Option<bool>,
+    #[serde(default)]
+    pub fee_waiver_expiration_time: Option<String>,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub settlement_timer_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,6 +276,28 @@ pub struct CancelOrderResponse {
     pub order: OrderResponse,
     #[serde(default)]
     pub reduced_by_fp: Option<String>,
+}
+
+// ── Events API models ──
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EventResponse {
+    pub event_ticker: String,
+    #[serde(default)]
+    pub series_ticker: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub markets: Option<Vec<MarketResponse>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EventsListResponse {
+    pub events: Vec<EventResponse>,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 // ── WebSocket message models ──

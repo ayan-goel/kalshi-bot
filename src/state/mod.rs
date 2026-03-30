@@ -1,12 +1,95 @@
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::exchange::models::OrderResponse;
+use crate::exchange::models::{MarketResponse, OrderResponse};
 use crate::orderbook::OrderBook;
 use crate::types::*;
+
+/// Metadata about a market stored alongside its order book.
+#[derive(Debug, Clone, Serialize)]
+pub struct MarketMeta {
+    pub event_ticker: Option<String>,
+    pub category: Option<String>,
+    pub close_time: Option<DateTime<Utc>>,
+    pub latest_expiration_time: Option<DateTime<Utc>>,
+    pub volume_24h: f64,
+    pub open_interest: f64,
+    pub score: f64,
+    pub tick_size: Decimal,
+    pub tick_min: Decimal,
+    pub tick_max: Decimal,
+}
+
+impl Default for MarketMeta {
+    fn default() -> Self {
+        Self {
+            event_ticker: None,
+            category: None,
+            close_time: None,
+            latest_expiration_time: None,
+            volume_24h: 0.0,
+            open_interest: 0.0,
+            score: 0.0,
+            tick_size: Decimal::new(1, 2),  // 0.01 default
+            tick_min: Decimal::new(1, 2),   // 0.01
+            tick_max: Decimal::new(99, 2),  // 0.99
+        }
+    }
+}
+
+impl MarketMeta {
+    pub fn from_market_response(m: &MarketResponse, score: f64) -> Self {
+        let tick_size = m
+            .price_ranges
+            .as_ref()
+            .and_then(|pr| pr.first())
+            .and_then(|r| r.step.parse::<Decimal>().ok())
+            .unwrap_or(Decimal::new(1, 2));
+
+        let tick_min = m
+            .price_ranges
+            .as_ref()
+            .and_then(|pr| pr.first())
+            .and_then(|r| r.start.parse::<Decimal>().ok())
+            .unwrap_or(Decimal::new(1, 2));
+
+        let tick_max = m
+            .price_ranges
+            .as_ref()
+            .and_then(|pr| pr.last())
+            .and_then(|r| r.end.parse::<Decimal>().ok())
+            .unwrap_or(Decimal::new(99, 2));
+
+        Self {
+            event_ticker: m.event_ticker.clone(),
+            category: m.category.clone(),
+            close_time: m.close_time.as_deref()
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                .map(|d| d.with_timezone(&Utc)),
+            latest_expiration_time: m.latest_expiration_time.as_deref()
+                .or(m.expiration_time.as_deref())
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                .map(|d| d.with_timezone(&Utc)),
+            volume_24h: m.volume_24h_fp.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            open_interest: m.open_interest_fp.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            score,
+            tick_size,
+            tick_min,
+            tick_max,
+        }
+    }
+
+    pub fn hours_to_expiry(&self) -> f64 {
+        self.latest_expiration_time
+            .or(self.close_time)
+            .map(|exp| (exp - Utc::now()).num_seconds() as f64 / 3600.0)
+            .unwrap_or(f64::MAX)
+    }
+}
 
 pub struct StateEngine {
     books: HashMap<MarketTicker, OrderBook>,
@@ -18,6 +101,8 @@ pub struct StateEngine {
     daily_pnl: Decimal,
     db_pool: PgPool,
     recent_trades: HashMap<MarketTicker, Vec<RecentTrade>>,
+    market_meta: HashMap<MarketTicker, MarketMeta>,
+    event_groups: HashMap<String, Vec<MarketTicker>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +140,8 @@ impl StateEngine {
             daily_pnl: Decimal::ZERO,
             db_pool,
             recent_trades: HashMap::new(),
+            market_meta: HashMap::new(),
+            event_groups: HashMap::new(),
         }
     }
 
@@ -128,6 +215,46 @@ impl StateEngine {
         &self.db_pool
     }
 
+    pub fn get_market_meta(&self, ticker: &MarketTicker) -> Option<&MarketMeta> {
+        self.market_meta.get(ticker)
+    }
+
+    pub fn set_market_meta(&mut self, ticker: MarketTicker, meta: MarketMeta) {
+        if let Some(ref et) = meta.event_ticker {
+            self.event_groups
+                .entry(et.clone())
+                .or_default()
+                .push(ticker.clone());
+        }
+        self.market_meta.insert(ticker, meta);
+    }
+
+    pub fn market_meta_map(&self) -> &HashMap<MarketTicker, MarketMeta> {
+        &self.market_meta
+    }
+
+    pub fn event_groups(&self) -> &HashMap<String, Vec<MarketTicker>> {
+        &self.event_groups
+    }
+
+    pub fn sibling_tickers(&self, ticker: &MarketTicker) -> Vec<MarketTicker> {
+        let event_ticker = self.market_meta.get(ticker).and_then(|m| m.event_ticker.as_ref());
+        match event_ticker {
+            Some(et) => self
+                .event_groups
+                .get(et)
+                .map(|v| v.iter().filter(|t| *t != ticker).cloned().collect())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Remove a market from the active set (for rescan swaps).
+    pub fn remove_market(&mut self, ticker: &MarketTicker) {
+        self.books.remove(ticker);
+        self.market_meta.remove(ticker);
+    }
+
     pub fn recent_trade_sign(&self, ticker: &MarketTicker) -> Decimal {
         let trades = match self.recent_trades.get(ticker) {
             Some(t) => t,
@@ -190,6 +317,8 @@ impl StateEngine {
         self.ever_connected = false;
         self.daily_pnl = Decimal::ZERO;
         self.recent_trades.clear();
+        self.market_meta.clear();
+        self.event_groups.clear();
     }
 
     pub async fn process_event(&mut self, event: ExchangeEvent) {

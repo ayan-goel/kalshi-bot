@@ -1,11 +1,14 @@
 mod api;
 mod bot_state;
 mod config;
+mod cross_market;
 mod db;
+mod event_detector;
 mod exchange;
 mod execution;
 mod fair_value;
 mod log_buffer;
+mod market_scanner;
 mod orderbook;
 mod risk;
 mod state;
@@ -52,7 +55,6 @@ async fn main() -> Result<()> {
     let db_pool = db::init_pool(&config).await?;
     tracing::info!("Database connected and migrations applied");
 
-    // Load config overrides from DB
     let config = load_config_overrides(config, &db_pool).await;
 
     let api_port = config.api_port;
@@ -83,7 +85,6 @@ async fn main() -> Result<()> {
         api_secret,
     };
 
-    // Spawn Axum HTTP server
     let router = api::create_router(app_state);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{api_port}")).await?;
     tracing::info!(port = api_port, "Axum API server starting");
@@ -94,7 +95,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Spawn PnL snapshot task
     let pnl_state = state_engine.clone();
     let pnl_pool = db_pool.clone();
     let pnl_broadcast = event_broadcast.clone();
@@ -131,7 +131,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Main bot control loop
     run_bot_control_loop(
         bot_cmd_rx,
         state_engine,
@@ -251,7 +250,6 @@ async fn run_bot_control_loop(
 
                         let mut bsm = bot_state.write().await;
                         let from = bsm.state().to_string();
-                        // Force to stopped regardless of current state
                         bsm.transition(BotState::Stopped, "kill_switch", None).await.ok();
                         drop(bsm);
 
@@ -262,7 +260,6 @@ async fn run_bot_control_loop(
                         });
                     }
                     Some(api::BotCommand::SwitchEnvironment { environment }) => {
-                        // Stop trading first
                         if let Some(tx) = trading_shutdown_tx.take() {
                             let _ = tx.send(()).await;
                         }
@@ -275,12 +272,10 @@ async fn run_bot_control_loop(
                         let _ = bsm.transition(BotState::Stopped, "env_switch", None).await;
                         drop(bsm);
 
-                        // Update environment in config
                         let mut cfg = config.write().await;
                         cfg.environment = environment.clone();
                         drop(cfg);
 
-                        // Clear state
                         let mut engine = state_engine.write().await;
                         engine.clear_all();
                         drop(engine);
@@ -313,13 +308,11 @@ async fn run_trading_loop(
 ) {
     let cfg = config.read().await.clone();
 
-    // Ensure each run starts from a clean in-memory state.
     {
         let mut engine = state_engine.write().await;
         engine.clear_all();
     }
 
-    // Create REST client
     let rest_client = match create_rest_client(&cfg) {
         Ok(c) => c,
         Err(e) => {
@@ -336,7 +329,7 @@ async fn run_trading_loop(
         }
     };
 
-    // Startup reconciliation
+    // Startup reconciliation with market scanning
     match reconcile_startup(&rest_client, &state_engine, &cfg).await {
         Ok(()) => {
             tracing::info!("Startup reconciliation complete");
@@ -356,7 +349,6 @@ async fn run_trading_loop(
         }
     }
 
-    // Transition to Running
     {
         let mut bsm = bot_state.write().await;
         if bsm.transition(BotState::Running, "reconciliation_complete", None).await.is_err() {
@@ -373,9 +365,9 @@ async fn run_trading_loop(
     // Spawn WebSocket
     let (event_tx, mut event_rx) = mpsc::channel::<types::ExchangeEvent>(4096);
     let ws_config = cfg.clone();
-    let target_markets = {
+    let target_markets: Vec<String> = {
         let engine = state_engine.read().await;
-        engine.books().keys().map(|k| k.0.clone()).collect::<Vec<_>>()
+        engine.books().keys().map(|k| k.0.clone()).collect()
     };
     let ws_markets = target_markets.clone();
     let ws_handle = tokio::spawn(async move {
@@ -387,11 +379,27 @@ async fn run_trading_loop(
     let mut execution_engine =
         execution::ExecutionEngine::new(rest_client.clone(), db_pool.clone(), &cfg.strategy);
     let fair_value_engine = fair_value::FairValueEngine::new(&cfg.strategy);
+    let cross_market_checker = cross_market::CrossMarketChecker::new();
+    let mut event_detector = event_detector::EventDetector::new(&cfg.strategy);
 
     let tick_interval = tokio::time::Duration::from_millis(cfg.strategy.tick_interval_ms);
     let mut tick = tokio::time::interval(tick_interval);
 
-    tracing::info!("Trading loop started");
+    // Market rescan timer
+    let rescan_interval = tokio::time::Duration::from_secs(
+        cfg.trading.market_rescan_interval_mins as u64 * 60,
+    );
+    let mut rescan_tick = tokio::time::interval(rescan_interval);
+    rescan_tick.tick().await; // consume the immediate first tick
+
+    let max_markets = cfg.trading.max_markets_active;
+
+    tracing::info!(
+        markets = target_markets.len(),
+        tick_ms = cfg.strategy.tick_interval_ms,
+        rescan_mins = cfg.trading.market_rescan_interval_mins,
+        "Trading loop started"
+    );
 
     loop {
         tokio::select! {
@@ -416,6 +424,50 @@ async fn run_trading_loop(
                     None => {
                         tracing::error!("Event channel closed in trading loop");
                         break;
+                    }
+                }
+            }
+            _ = rescan_tick.tick() => {
+                tracing::info!("Periodic market rescan triggered");
+                // Re-scan is a best-effort background task; failures are logged and ignored.
+                let cfg = config.read().await;
+                if cfg.trading.markets_allowlist.is_empty() {
+                    let scanner = market_scanner::MarketScanner::new(&cfg.trading);
+                    match scanner.select_markets(
+                        &rest_client,
+                        max_markets as usize,
+                        &cfg.trading.markets_allowlist,
+                    ).await {
+                        Ok((new_tickers, scored)) => {
+                            let mut engine = state_engine.write().await;
+                            // Add new markets
+                            for ticker in &new_tickers {
+                                let mt = types::MarketTicker::from(ticker.as_str());
+                                if engine.get_book(&mt).is_none() {
+                                    engine.ensure_book(mt.clone());
+                                    if let Some(sm) = scored.iter().find(|s| s.ticker == *ticker) {
+                                        // Fetch full market data for metadata
+                                        match rest_client.get_markets(None, Some(1)).await {
+                                            Ok(markets) => {
+                                                if let Some(m) = markets.into_iter().find(|m| m.ticker == *ticker) {
+                                                    let meta = state::MarketMeta::from_market_response(&m, sm.score);
+                                                    engine.set_market_meta(mt, meta);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, ticker = %ticker, "Failed to fetch market metadata during rescan");
+                                            }
+                                        }
+                                    }
+                                    tracing::info!(ticker = %ticker, "New market added from rescan");
+                                }
+                            }
+                            // Note: we don't remove old markets mid-session to avoid
+                            // orphan order complexity. They'll be cleaned up on next restart.
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Market rescan failed");
+                        }
                     }
                 }
             }
@@ -451,12 +503,23 @@ async fn run_trading_loop(
                     break;
                 }
 
+                // Update event detector for all markets
+                let all_tickers: Vec<types::MarketTicker> = engine.books().keys().cloned().collect();
+                for ticker in &all_tickers {
+                    if let Some(book) = engine.get_book(ticker) {
+                        event_detector.update(ticker, book);
+                    }
+                }
+
+                // Compute target quotes with all new engine features
                 let target_quotes = compute_target_quotes(
                     &engine,
                     &fair_value_engine,
                     &strategy_engine,
                     &risk_engine,
-                    &target_markets,
+                    &event_detector,
+                    &cross_market_checker,
+                    max_markets,
                 );
 
                 drop(engine);
@@ -510,26 +573,43 @@ async fn reconcile_startup(
         engine.upsert_position(pos);
     }
 
-    tracing::info!("Step 4/4: Selecting target markets...");
-    let max_markets = config.trading.max_markets_active.max(1);
-    let mut target_markets = if config.trading.markets_allowlist.is_empty() {
-        let markets = rest_client
-            .get_markets(Some("open"), Some(max_markets))
-            .await
-            .context("reconcile step 4: get_markets failed")?;
-        markets.into_iter().map(|m| m.ticker).collect::<Vec<_>>()
-    } else {
-        config.trading.markets_allowlist.clone()
-    };
+    tracing::info!("Step 4/4: Selecting target markets via scanner...");
+    let max_markets = config.trading.max_markets_active.max(1) as usize;
+    let scanner = market_scanner::MarketScanner::new(&config.trading);
+    let (selected_tickers, all_scored) = scanner
+        .select_markets(rest_client, max_markets, &config.trading.markets_allowlist)
+        .await
+        .context("reconcile step 4: market scanning failed")?;
 
-    if target_markets.len() > max_markets as usize {
-        target_markets.truncate(max_markets as usize);
+    // Now fetch full metadata for selected markets and set up books
+    let all_market_data = rest_client
+        .get_all_markets(Some("open"), None, None)
+        .await
+        .unwrap_or_default();
+
+    let market_data_map: std::collections::HashMap<&str, &exchange::models::MarketResponse> =
+        all_market_data.iter().map(|m| (m.ticker.as_str(), m)).collect();
+
+    for ticker in &selected_tickers {
+        let mt = types::MarketTicker::from(ticker.as_str());
+        engine.ensure_book(mt.clone());
+
+        let score = all_scored
+            .iter()
+            .find(|s| s.ticker == *ticker)
+            .map(|s| s.score)
+            .unwrap_or(0.0);
+
+        if let Some(m) = market_data_map.get(ticker.as_str()) {
+            let meta = state::MarketMeta::from_market_response(m, score);
+            engine.set_market_meta(mt, meta);
+        }
     }
 
-    tracing::info!(count = target_markets.len(), "Target markets selected");
-    for ticker in &target_markets {
-        engine.ensure_book(types::MarketTicker::from(ticker.as_str()));
-    }
+    tracing::info!(
+        count = selected_tickers.len(),
+        "Target markets selected and metadata loaded"
+    );
 
     Ok(())
 }
@@ -593,27 +673,77 @@ fn compute_target_quotes(
     fv_engine: &fair_value::FairValueEngine,
     strategy: &strategy::MarketMakerStrategy,
     risk: &risk::RiskEngine,
-    markets: &[String],
+    event_detector: &event_detector::EventDetector,
+    cross_market: &cross_market::CrossMarketChecker,
+    max_markets: u32,
 ) -> Vec<types::TargetQuote> {
+    let balance = state.balance().clone();
+    let all_tickers: Vec<types::MarketTicker> = state.books().keys().cloned().collect();
+
     let mut quotes = Vec::new();
-    for ticker_str in markets {
-        let ticker = types::MarketTicker::from(ticker_str.as_str());
-        let book = match state.get_book(&ticker) {
+    for ticker in &all_tickers {
+        let book = match state.get_book(ticker) {
             Some(b) => b,
             None => continue,
         };
 
-        let position = state.get_position(&ticker);
-        let fv = match fv_engine.compute(book, position) {
+        let position = state.get_position(ticker);
+        let meta = state.get_market_meta(ticker);
+        let trade_sign = state.recent_trade_sign(ticker);
+
+        let fv = match fv_engine.compute(ticker, book, position, trade_sign, meta) {
             Some(fv) => fv,
             None => continue,
         };
 
-        let target = strategy.generate_quotes(&ticker, &fv, book, position);
-        if let Some(target) = target {
-            let _ = risk.check_target_quote(&target, state);
-            quotes.push(target);
+        let target = strategy.generate_quotes(
+            ticker,
+            &fv,
+            book,
+            position,
+            meta,
+            &balance,
+            max_markets,
+        );
+
+        if let Some(mut target) = target {
+            // Apply event detector spread multiplier
+            let mult = event_detector.spread_multiplier(ticker);
+            if mult > rust_decimal::Decimal::ONE {
+                if let (Some(ref mut bid), Some(ref mut ask)) = (&mut target.yes_bid, &mut target.yes_ask) {
+                    let mid = (bid.price + ask.price) / rust_decimal::Decimal::TWO;
+                    let half = (ask.price - bid.price) / rust_decimal::Decimal::TWO;
+                    let widened_half = half * mult;
+                    bid.price = mid - widened_half;
+                    ask.price = mid + widened_half;
+                }
+            }
+
+            // Risk check on the target quote
+            match risk.check_target_quote(&target, state, Some(fv.price)) {
+                types::RiskDecision::Approved => {
+                    quotes.push(target);
+                }
+                types::RiskDecision::Rejected { reason } => {
+                    tracing::debug!(
+                        market = %ticker,
+                        reason = %reason,
+                        "Target quote rejected by risk"
+                    );
+                }
+                types::RiskDecision::KillSwitch { reason } => {
+                    tracing::error!(
+                        market = %ticker,
+                        reason = %reason,
+                        "Kill switch from target quote risk check"
+                    );
+                }
+            }
         }
     }
+
+    // Apply cross-market consistency adjustments
+    let quotes = cross_market.adjust_quotes(quotes, state);
+
     quotes
 }

@@ -7,6 +7,10 @@ import { BarChart3 } from "lucide-react";
 export default function MarketsPage() {
   const { data: markets, isLoading } = useMarkets();
 
+  const sorted = markets
+    ? [...markets].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    : [];
+
   return (
     <div className="space-y-6 max-w-[1400px]">
       <div>
@@ -14,7 +18,7 @@ export default function MarketsPage() {
           Markets
         </h2>
         <p className="text-sm text-zinc-500 mt-0.5">
-          Active markets being monitored by the bot
+          Active markets ranked by scanner score (volume, spread, OI, edge, expiry, price)
         </p>
       </div>
 
@@ -22,17 +26,17 @@ export default function MarketsPage() {
         <div className="text-sm text-zinc-600 animate-pulse">Loading markets...</div>
       )}
 
-      {markets && markets.length === 0 && (
+      {sorted.length === 0 && !isLoading && (
         <div className="rounded-xl border border-[#1e1e2e] bg-[#111118] p-12 text-center">
           <BarChart3 className="h-8 w-8 text-zinc-700 mx-auto mb-3" />
           <p className="text-sm text-zinc-500">
-            No active markets. Start the bot to begin monitoring.
+            No active markets. Start the bot to begin scanning.
           </p>
         </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        {markets?.map((m) => (
+        {sorted.map((m) => (
           <MarketCard key={m.ticker} market={m} />
         ))}
       </div>

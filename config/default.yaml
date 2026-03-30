@@ -16,33 +16,55 @@ trading:
   enabled: false
   markets_allowlist: []
   categories_allowlist: []
-  max_open_orders: 500
-  max_markets_active: 30
+  max_open_orders: 50
+  max_markets_active: 5
+  market_rescan_interval_mins: 15
+  min_time_to_expiry_hours: 2.0
+  max_time_to_expiry_hours: 168.0
+  min_volume_24h: 0.0
+  market_score_weights:
+    volume: 0.25
+    spread: 0.20
+    open_interest: 0.15
+    expiry: 0.15
+    edge: 0.15
+    price_centrality: 0.10
 
 strategy:
-  base_half_spread: "0.02"
-  min_edge_after_fees: "0.015"
-  default_order_size: 5
-  max_order_size: 25
-  min_rest_ms: 1500
+  base_half_spread: "0.03"
+  min_edge_after_fees: "0.005"
+  default_order_size: 1
+  max_order_size: 3
+  min_rest_ms: 3000
   repricing_threshold: "0.01"
-  inventory_skew_coeff: "0.25"
-  volatility_widen_coeff: "0.40"
-  tick_interval_ms: 1000
+  inventory_skew_coeff: "0.30"
+  volatility_widen_coeff: "0.50"
+  tick_interval_ms: 2000
   order_imbalance_alpha: "0.05"
   trade_sign_alpha: "0.02"
   inventory_penalty_k1: "0.03"
   inventory_penalty_k3: "0.001"
+  inv_spread_scale: "0.10"
+  inv_skew_scale: "0.01"
+  vol_baseline_spread: "0.02"
+  expiry_widen_coeff: "0.01"
+  expiry_widen_threshold_hours: 4.0
+  event_half_spread_multiplier: "3.0"
+  event_threshold: "0.05"
+  event_decay_seconds: 30
 
 risk:
-  max_loss_daily: "250.00"
-  max_market_notional: "1500.00"
-  max_market_inventory_contracts: 100
-  max_total_reserved: "4000.00"
-  max_open_orders: 500
+  max_loss_daily: "5.00"
+  max_market_notional: "10.00"
+  max_market_inventory_contracts: 5
+  max_total_reserved: "25.00"
+  max_open_orders: 50
   cancel_all_on_disconnect: true
   disconnect_timeout_secs: 30
   seq_gap_timeout_secs: 10
+  max_capital_per_market: "10.00"
+  max_portfolio_utilization: "0.50"
+  max_fair_deviation: "0.10"
 
 database:
   url_env: "DATABASE_URL"
