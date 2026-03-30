@@ -15,6 +15,7 @@ import { useStatus } from "@/lib/hooks";
 import { api } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { ArrowRightLeft } from "lucide-react";
 
 export function EnvSwitcher() {
   const { data: status } = useStatus();
@@ -51,19 +52,35 @@ export function EnvSwitcher() {
 
   return (
     <>
-      <div className="flex items-center gap-2">
-        <span className="text-sm text-muted-foreground">Environment:</span>
+      <div className="flex items-center gap-3">
+        <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">
+          Environment
+        </span>
         {isDemo ? (
           <>
-            <span className="font-medium text-blue-600">DEMO</span>
-            <Button size="sm" variant="destructive" onClick={() => setShowConfirm(true)}>
+            <span className="text-xs font-semibold text-blue-400 bg-blue-400/10 px-2 py-0.5 rounded">
+              DEMO
+            </span>
+            <Button
+              size="sm"
+              onClick={() => setShowConfirm(true)}
+              className="bg-red-600/15 hover:bg-red-600/25 text-red-400 border border-red-500/20 text-xs font-medium h-7 px-2.5"
+            >
+              <ArrowRightLeft className="mr-1.5 h-3 w-3" />
               Switch to Production
             </Button>
           </>
         ) : (
           <>
-            <span className="font-bold text-red-600">PRODUCTION</span>
-            <Button size="sm" variant="outline" onClick={switchToDemo}>
+            <span className="text-xs font-semibold text-red-400 bg-red-400/10 px-2 py-0.5 rounded">
+              PRODUCTION
+            </span>
+            <Button
+              size="sm"
+              onClick={switchToDemo}
+              className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-xs font-medium h-7 px-2.5"
+            >
+              <ArrowRightLeft className="mr-1.5 h-3 w-3" />
               Switch to Demo
             </Button>
           </>
@@ -71,10 +88,12 @@ export function EnvSwitcher() {
       </div>
 
       <Dialog open={showConfirm} onOpenChange={setShowConfirm}>
-        <DialogContent>
+        <DialogContent className="bg-[#111118] border-[#1e1e2e]">
           <DialogHeader>
-            <DialogTitle>Switch to Production</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-zinc-100">
+              Switch to Production
+            </DialogTitle>
+            <DialogDescription className="text-zinc-500">
               You are about to switch to PRODUCTION mode. This will use real
               money. Type &quot;CONFIRM&quot; to proceed.
             </DialogDescription>
@@ -83,15 +102,20 @@ export function EnvSwitcher() {
             value={confirmText}
             onChange={(e) => setConfirmText(e.target.value)}
             placeholder='Type "CONFIRM"'
+            className="bg-[#0a0a0f] border-[#1e1e2e] text-zinc-100 font-mono"
           />
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowConfirm(false)}>
+            <Button
+              variant="outline"
+              onClick={() => setShowConfirm(false)}
+              className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700"
+            >
               Cancel
             </Button>
             <Button
-              variant="destructive"
               disabled={confirmText !== "CONFIRM"}
               onClick={switchToProduction}
+              className="bg-red-600 hover:bg-red-500 text-white"
             >
               Switch to Production
             </Button>

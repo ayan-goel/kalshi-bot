@@ -17,7 +17,7 @@ export function PnlChart() {
 
   if (!data?.snapshots?.length) {
     return (
-      <div className="flex h-[300px] items-center justify-center text-muted-foreground">
+      <div className="flex h-[280px] items-center justify-center text-zinc-600 text-sm">
         No PnL data yet
       </div>
     );
@@ -32,17 +32,33 @@ export function PnlChart() {
   }));
 
   return (
-    <ResponsiveContainer width="100%" height={300}>
+    <ResponsiveContainer width="100%" height={280}>
       <LineChart data={chartData}>
-        <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
+        <CartesianGrid stroke="#1e1e2e" strokeDasharray="none" />
         <XAxis
           dataKey="time"
-          tick={{ fontSize: 11 }}
+          tick={{ fontSize: 11, fill: "#52525b" }}
+          axisLine={{ stroke: "#1e1e2e" }}
+          tickLine={{ stroke: "#1e1e2e" }}
           interval="preserveStartEnd"
         />
-        <YAxis tick={{ fontSize: 11 }} />
-        <Tooltip />
-        <Legend />
+        <YAxis
+          tick={{ fontSize: 11, fill: "#52525b" }}
+          axisLine={{ stroke: "#1e1e2e" }}
+          tickLine={{ stroke: "#1e1e2e" }}
+        />
+        <Tooltip
+          contentStyle={{
+            backgroundColor: "#111118",
+            border: "1px solid #1e1e2e",
+            borderRadius: "8px",
+            color: "#e4e4e7",
+            fontSize: "12px",
+          }}
+        />
+        <Legend
+          wrapperStyle={{ fontSize: "12px", color: "#71717a" }}
+        />
         <Line
           type="monotone"
           dataKey="realized"
@@ -54,7 +70,7 @@ export function PnlChart() {
         <Line
           type="monotone"
           dataKey="unrealized"
-          stroke="#3b82f6"
+          stroke="#6366f1"
           name="Unrealized"
           dot={false}
           strokeWidth={2}
@@ -65,8 +81,8 @@ export function PnlChart() {
           stroke="#f59e0b"
           name="Total"
           dot={false}
-          strokeWidth={2}
-          strokeDasharray="5 5"
+          strokeWidth={1.5}
+          strokeDasharray="4 4"
         />
       </LineChart>
     </ResponsiveContainer>

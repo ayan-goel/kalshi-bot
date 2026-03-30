@@ -49,26 +49,26 @@ export function BotControls() {
         onClick={handleStart}
         disabled={state !== "stopped"}
         size="sm"
-        className="bg-green-600 hover:bg-green-700"
+        className="bg-emerald-600 hover:bg-emerald-500 text-white border-0 text-xs font-medium h-8 px-3"
       >
-        <Play className="mr-1 h-4 w-4" />
+        <Play className="mr-1.5 h-3.5 w-3.5" />
         Start
       </Button>
       <Button
         onClick={handleStop}
         disabled={state !== "running" && state !== "error"}
         size="sm"
-        variant="secondary"
+        className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-xs font-medium h-8 px-3"
       >
-        <Square className="mr-1 h-4 w-4" />
+        <Square className="mr-1.5 h-3.5 w-3.5" />
         Stop
       </Button>
       <Button
         onClick={handleKill}
         size="sm"
-        variant="destructive"
+        className="bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 text-xs font-medium h-8 px-3"
       >
-        <Zap className="mr-1 h-4 w-4" />
+        <Zap className="mr-1.5 h-3.5 w-3.5" />
         Kill
       </Button>
     </div>

@@ -7,6 +7,49 @@ use rsa::sha2::Sha256;
 use rsa::signature::RandomizedSigner;
 use rsa::RsaPrivateKey;
 
+/// Normalize a PEM string that may have come from an environment variable.
+///
+/// Environment variables can encode newlines as:
+///   - Actual newlines (ideal)
+///   - Literal `\n` two-character sequences (common in Railway / shell exports)
+///   - `\r\n` Windows-style line endings
+///   - The whole value wrapped in surrounding quotes
+///
+/// We reconstruct the PEM canonically: extract the base64 payload, strip all
+/// whitespace from it, re-chunk it into 64-char lines, and wrap it back in the
+/// original header/footer. This is immune to all encoding variations.
+fn normalize_pem(raw: &str) -> String {
+    // Strip surrounding quotes that some env systems add
+    let s = raw.trim().trim_matches('"').trim_matches('\'');
+
+    // Replace literal \n with real newlines, then normalise \r\n -> \n
+    let s = s.replace("\\n", "\n").replace("\r\n", "\n");
+
+    // Detect header line
+    let (header, footer) = if s.contains("RSA PRIVATE KEY") {
+        ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----")
+    } else {
+        ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----")
+    };
+
+    // Extract just the base64 payload (everything between header and footer)
+    let b64: String = s
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("-----") && !l.is_empty())
+        .collect();
+
+    // Re-chunk into standard 64-char lines
+    let body = b64
+        .as_bytes()
+        .chunks(64)
+        .map(|c| std::str::from_utf8(c).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("{header}\n{body}\n{footer}\n")
+}
+
 #[derive(Clone)]
 pub struct KalshiAuth {
     api_key: String,
@@ -30,9 +73,10 @@ impl KalshiAuth {
     }
 
     fn from_pem(api_key: String, pem: &str) -> Result<Self> {
+        let normalized = normalize_pem(pem);
         // Try PKCS#8 first, then fall back to PKCS#1
-        let private_key = RsaPrivateKey::from_pkcs8_pem(pem)
-            .or_else(|_| RsaPrivateKey::from_pkcs1_pem(pem))
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&normalized)
+            .or_else(|_| RsaPrivateKey::from_pkcs1_pem(&normalized))
             .context("Failed to parse RSA private key (tried PKCS#8 and PKCS#1 PEM)")?;
         let signing_key = BlindedSigningKey::<Sha256>::new(private_key);
         Ok(Self {
@@ -50,8 +94,7 @@ impl KalshiAuth {
 
         // 1. Try raw PEM from env var
         if let Ok(raw_pem) = std::env::var("KALSHI_PRIVATE_KEY") {
-            let pem = raw_pem.replace("\\n", "\n");
-            return Self::from_pem(api_key, &pem);
+            return Self::from_pem(api_key, &raw_pem);
         }
 
         // 2. Try base64

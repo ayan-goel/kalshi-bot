@@ -8,6 +8,7 @@ import {
   BarChart3,
   FileText,
   ShieldAlert,
+  Activity,
 } from "lucide-react";
 import { StatusBadge } from "@/components/status-badge";
 import { useStatus, useBotWebSocket } from "@/lib/hooks";
@@ -27,14 +28,27 @@ export function SidebarNav() {
   useBotWebSocket();
 
   return (
-    <aside className="w-56 border-r bg-muted/30 flex flex-col min-h-screen">
-      <div className="p-4 border-b">
-        <h1 className="font-bold text-lg">Kalshi Bot</h1>
-        <div className="mt-2">
+    <aside className="w-60 border-r border-[#1e1e2e] bg-[#0d0d14] flex flex-col min-h-screen">
+      <div className="px-5 py-5 border-b border-[#1e1e2e]">
+        <div className="flex items-center gap-2.5">
+          <div className="h-8 w-8 rounded-lg bg-indigo-500/20 flex items-center justify-center">
+            <Activity className="h-4 w-4 text-indigo-400" />
+          </div>
+          <div>
+            <h1 className="font-semibold text-sm text-zinc-100 tracking-tight">
+              Kalshi Bot
+            </h1>
+            <p className="text-[11px] text-zinc-500 font-medium">
+              Trading Terminal
+            </p>
+          </div>
+        </div>
+        <div className="mt-3.5">
           <StatusBadge status={status} />
         </div>
       </div>
-      <nav className="flex-1 p-2 space-y-1">
+
+      <nav className="flex-1 px-3 py-3 space-y-0.5">
         {navItems.map((item) => {
           const isActive =
             item.href === "/"
@@ -45,29 +59,43 @@ export function SidebarNav() {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                "flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-all",
                 isActive
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  ? "bg-indigo-500/15 text-indigo-400"
+                  : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.03]"
               )}
             >
-              <item.icon className="h-4 w-4" />
+              <item.icon className={cn("h-4 w-4", isActive ? "text-indigo-400" : "text-zinc-600")} />
               {item.label}
             </Link>
           );
         })}
       </nav>
-      <div className="p-4 border-t text-xs text-muted-foreground">
-        {status?.environment === "production" ? (
-          <span className="text-red-600 font-bold">PRODUCTION</span>
-        ) : (
-          <span className="text-blue-600">DEMO</span>
-        )}
-        {status?.uptime_secs != null && (
-          <span className="ml-2">
-            Up {Math.floor(status.uptime_secs / 60)}m
-          </span>
-        )}
+
+      <div className="px-5 py-4 border-t border-[#1e1e2e]">
+        <div className="flex items-center justify-between">
+          {status?.environment === "production" ? (
+            <div className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-xs font-semibold text-red-400 tracking-wide uppercase">
+                Production
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-blue-500" />
+              <span className="text-xs font-medium text-blue-400 tracking-wide uppercase">
+                Demo
+              </span>
+            </div>
+          )}
+          {status?.uptime_secs != null && (
+            <span className="text-[11px] text-zinc-600 font-mono">
+              {Math.floor(status.uptime_secs / 3600)}h{" "}
+              {Math.floor((status.uptime_secs % 3600) / 60)}m
+            </span>
+          )}
+        </div>
       </div>
     </aside>
   );

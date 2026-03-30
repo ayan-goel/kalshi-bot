@@ -1,16 +1,17 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import { SidebarNav } from "./sidebar-nav";
+import { EnvBannerClient } from "./env-banner";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const inter = Inter({
+  variable: "--font-sans",
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-mono",
   subsets: ["latin"],
 });
 
@@ -27,23 +28,17 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${inter.variable} ${jetbrainsMono.variable} dark h-full`}
     >
-      <body className="min-h-full flex">
+      <body className="min-h-full flex bg-[#0a0a0f] text-zinc-100 antialiased">
         <Providers>
           <SidebarNav />
           <main className="flex-1 overflow-auto">
-            <EnvBanner />
-            <div className="p-6">{children}</div>
+            <EnvBannerClient />
+            <div className="p-8">{children}</div>
           </main>
         </Providers>
       </body>
     </html>
   );
 }
-
-function EnvBanner() {
-  return <EnvBannerClient />;
-}
-
-import { EnvBannerClient } from "./env-banner";

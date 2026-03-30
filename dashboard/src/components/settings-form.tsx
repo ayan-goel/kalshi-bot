@@ -5,12 +5,50 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfig } from "@/lib/hooks";
 import { api } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { StrategyConfig, RiskConfig, TradingConfig } from "@/lib/types";
+import { Save } from "lucide-react";
+import { cn } from "@/lib/utils";
+
+function SectionCard({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-[#1e1e2e] bg-[#111118]">
+      <div className="px-5 py-3.5 border-b border-[#1e1e2e]">
+        <h3 className="text-sm font-semibold text-zinc-200">{title}</h3>
+      </div>
+      <div className="p-5">{children}</div>
+    </div>
+  );
+}
+
+function FormField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">
+        {label}
+      </Label>
+      {children}
+    </div>
+  );
+}
+
+const inputClass =
+  "bg-[#0a0a0f] border-[#1e1e2e] text-zinc-200 font-mono text-sm focus:border-indigo-500/50 focus:ring-indigo-500/20 h-9";
 
 function StrategyForm({ initial }: { initial: StrategyConfig }) {
   const [values, setValues] = useState(initial);
@@ -49,33 +87,29 @@ function StrategyForm({ initial }: { initial: StrategyConfig }) {
   ];
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Strategy</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          {fields.map((f) => (
-            <div key={f.key}>
-              <Label className="text-xs">{f.label}</Label>
-              <Input
-                type={f.type}
-                value={values[f.key]}
-                onChange={(e) =>
-                  update(
-                    f.key,
-                    f.type === "number" ? Number(e.target.value) : e.target.value
-                  )
-                }
-              />
-            </div>
-          ))}
-        </div>
-        <Button onClick={save} className="w-full">
-          Save Strategy
-        </Button>
-      </CardContent>
-    </Card>
+    <SectionCard title="Strategy Parameters">
+      <div className="grid grid-cols-2 gap-4">
+        {fields.map((f) => (
+          <FormField key={f.key} label={f.label}>
+            <Input
+              type={f.type}
+              value={values[f.key]}
+              onChange={(e) =>
+                update(f.key, f.type === "number" ? Number(e.target.value) : e.target.value)
+              }
+              className={inputClass}
+            />
+          </FormField>
+        ))}
+      </div>
+      <Button
+        onClick={save}
+        className="w-full mt-5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium h-9"
+      >
+        <Save className="mr-2 h-3.5 w-3.5" />
+        Save Strategy
+      </Button>
+    </SectionCard>
   );
 }
 
@@ -100,53 +134,45 @@ function RiskForm({ initial }: { initial: RiskConfig }) {
   };
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Risk</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label className="text-xs">Max Daily Loss</Label>
-            <Input value={values.max_loss_daily} onChange={(e) => update("max_loss_daily", e.target.value)} />
-          </div>
-          <div>
-            <Label className="text-xs">Max Market Notional</Label>
-            <Input value={values.max_market_notional} onChange={(e) => update("max_market_notional", e.target.value)} />
-          </div>
-          <div>
-            <Label className="text-xs">Max Inventory Contracts</Label>
-            <Input type="number" value={values.max_market_inventory_contracts} onChange={(e) => update("max_market_inventory_contracts", Number(e.target.value))} />
-          </div>
-          <div>
-            <Label className="text-xs">Max Total Reserved</Label>
-            <Input value={values.max_total_reserved} onChange={(e) => update("max_total_reserved", e.target.value)} />
-          </div>
-          <div>
-            <Label className="text-xs">Max Open Orders</Label>
-            <Input type="number" value={values.max_open_orders} onChange={(e) => update("max_open_orders", Number(e.target.value))} />
-          </div>
-          <div>
-            <Label className="text-xs">Disconnect Timeout (s)</Label>
-            <Input type="number" value={values.disconnect_timeout_secs} onChange={(e) => update("disconnect_timeout_secs", Number(e.target.value))} />
-          </div>
-          <div>
-            <Label className="text-xs">Seq Gap Timeout (s)</Label>
-            <Input type="number" value={values.seq_gap_timeout_secs} onChange={(e) => update("seq_gap_timeout_secs", Number(e.target.value))} />
-          </div>
-          <div className="flex items-center gap-2 pt-5">
-            <Switch
-              checked={values.cancel_all_on_disconnect}
-              onCheckedChange={(checked) => update("cancel_all_on_disconnect", checked)}
-            />
-            <Label className="text-xs">Cancel All on Disconnect</Label>
-          </div>
+    <SectionCard title="Risk Limits">
+      <div className="grid grid-cols-2 gap-4">
+        <FormField label="Max Daily Loss">
+          <Input value={values.max_loss_daily} onChange={(e) => update("max_loss_daily", e.target.value)} className={inputClass} />
+        </FormField>
+        <FormField label="Max Market Notional">
+          <Input value={values.max_market_notional} onChange={(e) => update("max_market_notional", e.target.value)} className={inputClass} />
+        </FormField>
+        <FormField label="Max Inventory Contracts">
+          <Input type="number" value={values.max_market_inventory_contracts} onChange={(e) => update("max_market_inventory_contracts", Number(e.target.value))} className={inputClass} />
+        </FormField>
+        <FormField label="Max Total Reserved">
+          <Input value={values.max_total_reserved} onChange={(e) => update("max_total_reserved", e.target.value)} className={inputClass} />
+        </FormField>
+        <FormField label="Max Open Orders">
+          <Input type="number" value={values.max_open_orders} onChange={(e) => update("max_open_orders", Number(e.target.value))} className={inputClass} />
+        </FormField>
+        <FormField label="Disconnect Timeout (s)">
+          <Input type="number" value={values.disconnect_timeout_secs} onChange={(e) => update("disconnect_timeout_secs", Number(e.target.value))} className={inputClass} />
+        </FormField>
+        <FormField label="Seq Gap Timeout (s)">
+          <Input type="number" value={values.seq_gap_timeout_secs} onChange={(e) => update("seq_gap_timeout_secs", Number(e.target.value))} className={inputClass} />
+        </FormField>
+        <div className="flex items-center gap-3 pt-6">
+          <Switch
+            checked={values.cancel_all_on_disconnect}
+            onCheckedChange={(checked) => update("cancel_all_on_disconnect", checked)}
+          />
+          <Label className="text-xs text-zinc-400">Cancel All on Disconnect</Label>
         </div>
-        <Button onClick={save} className="w-full">
-          Save Risk
-        </Button>
-      </CardContent>
-    </Card>
+      </div>
+      <Button
+        onClick={save}
+        className="w-full mt-5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium h-9"
+      >
+        <Save className="mr-2 h-3.5 w-3.5" />
+        Save Risk
+      </Button>
+    </SectionCard>
   );
 }
 
@@ -171,63 +197,61 @@ function TradingForm({ initial }: { initial: TradingConfig }) {
   };
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Trading</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="flex items-center gap-2">
+    <SectionCard title="Trading Configuration">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between rounded-lg bg-[#0a0a0f] border border-[#1e1e2e] p-3">
+          <div>
+            <p className="text-sm font-medium text-zinc-200">Trading Enabled</p>
+            <p className="text-[11px] text-zinc-500">
+              {values.enabled ? "Bot will place real orders" : "Bot will not place orders"}
+            </p>
+          </div>
           <Switch
             checked={values.enabled}
             onCheckedChange={(checked) => update("enabled", checked)}
           />
-          <Label>Trading Enabled</Label>
         </div>
-        <div>
-          <Label className="text-xs">Markets Allowlist (comma-separated)</Label>
+        <FormField label="Markets Allowlist (comma-separated)">
           <Input
             value={values.markets_allowlist.join(", ")}
             onChange={(e) =>
               update(
                 "markets_allowlist",
-                e.target.value
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean)
+                e.target.value.split(",").map((s) => s.trim()).filter(Boolean)
               )
             }
+            className={inputClass}
           />
-        </div>
-        <div>
-          <Label className="text-xs">Categories Allowlist (comma-separated)</Label>
+        </FormField>
+        <FormField label="Categories Allowlist (comma-separated)">
           <Input
             value={values.categories_allowlist.join(", ")}
             onChange={(e) =>
               update(
                 "categories_allowlist",
-                e.target.value
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean)
+                e.target.value.split(",").map((s) => s.trim()).filter(Boolean)
               )
             }
+            className={inputClass}
           />
+        </FormField>
+        <div className="grid grid-cols-2 gap-4">
+          <FormField label="Max Open Orders">
+            <Input type="number" value={values.max_open_orders} onChange={(e) => update("max_open_orders", Number(e.target.value))} className={inputClass} />
+          </FormField>
+          <FormField label="Max Markets Active">
+            <Input type="number" value={values.max_markets_active} onChange={(e) => update("max_markets_active", Number(e.target.value))} className={inputClass} />
+          </FormField>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label className="text-xs">Max Open Orders</Label>
-            <Input type="number" value={values.max_open_orders} onChange={(e) => update("max_open_orders", Number(e.target.value))} />
-          </div>
-          <div>
-            <Label className="text-xs">Max Markets Active</Label>
-            <Input type="number" value={values.max_markets_active} onChange={(e) => update("max_markets_active", Number(e.target.value))} />
-          </div>
-        </div>
-        <Button onClick={save} className="w-full">
-          Save Trading
-        </Button>
-      </CardContent>
-    </Card>
+      </div>
+      <Button
+        onClick={save}
+        className="w-full mt-5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium h-9"
+      >
+        <Save className="mr-2 h-3.5 w-3.5" />
+        Save Trading
+      </Button>
+    </SectionCard>
   );
 }
 
@@ -235,7 +259,9 @@ export function SettingsForm() {
   const { data } = useConfig();
 
   if (!data) {
-    return <div className="text-muted-foreground">Loading config...</div>;
+    return (
+      <div className="text-zinc-600 text-sm">Loading config...</div>
+    );
   }
 
   return (
