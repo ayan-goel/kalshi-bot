@@ -116,10 +116,17 @@ where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let md = event.metadata();
+
+        // Only capture our own bot events; skip noisy library internals
+        // (hyper, sqlx, tungstenite, tokio_tungstenite, etc.)
+        if !md.target().starts_with("kalshi_bot") {
+            return;
+        }
+
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
 
-        let md = event.metadata();
         let message = visitor
             .message
             .unwrap_or_else(|| md.name().to_string());

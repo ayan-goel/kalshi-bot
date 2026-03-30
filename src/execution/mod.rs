@@ -82,7 +82,13 @@ impl ExecutionEngine {
     }
 
     /// Reconcile target quotes with live orders: cancel stale, create missing, update changed.
-    pub async fn reconcile(&mut self, state: &StateEngine, targets: &[TargetQuote]) {
+    /// Returns the set of markets that returned `invalid_order` so the caller can blacklist them.
+    pub async fn reconcile(
+        &mut self,
+        state: &StateEngine,
+        targets: &[TargetQuote],
+    ) -> Vec<MarketTicker> {
+        let mut invalid_order_markets: Vec<MarketTicker> = Vec::new();
         // Build a map of desired quotes by market
         let mut desired: HashMap<MarketTicker, &TargetQuote> = HashMap::new();
         for target in targets {
@@ -196,25 +202,38 @@ impl ExecutionEngine {
             let ticker = MarketTicker::from(req.ticker.as_str());
             match self.rest_client.create_order(req).await {
                 Ok(resp) => {
-                    debug!(
+                    info!(
                         order_id = %resp.order_id,
                         ticker = %req.ticker,
+                        action = %req.action,
                         side = %req.side,
+                        price = req.yes_price_dollars.as_deref().or(req.no_price_dollars.as_deref()).unwrap_or("?"),
+                        count = ?req.count,
                         "Order created"
                     );
                     self.last_action_time.insert(ticker, Instant::now());
                 }
                 Err(e) => {
+                    let err_str = format!("{e:?}");
                     let req_json = serde_json::to_string(req).unwrap_or_default();
                     warn!(
                         ticker = %req.ticker,
+                        action = %req.action,
+                        price = req.yes_price_dollars.as_deref().or(req.no_price_dollars.as_deref()).unwrap_or("?"),
                         error = %e,
                         request_json = %req_json,
                         "Order creation failed"
                     );
+                    // Surface markets that return invalid_order so the caller
+                    // can blacklist them for the current session.
+                    if err_str.contains("invalid_order") {
+                        invalid_order_markets.push(ticker);
+                    }
                 }
             }
         }
+
+        invalid_order_markets
     }
 
     fn reconcile_side(

@@ -8,12 +8,14 @@ use crate::types::TargetQuote;
 
 /// Cross-market consistency checker.
 ///
-/// For markets within the same event, their implied YES probabilities
-/// should sum to approximately 1.0 (for mutually exclusive outcomes).
+/// Applies ONLY to true mutex pairs: exactly 2 sibling markets whose YES
+/// probabilities must sum to 1.0 (e.g. team A wins / team B wins).
 ///
-/// When the sum deviates, this adjusts quotes:
-/// - Sum > 1 + tolerance: widen ask on overpriced siblings
-/// - Sum < 1 - tolerance: tighten bid on underpriced siblings
+/// Sports markets often have many sibling markets under one event_ticker
+/// (totals: "over 4", "over 5", ...) that are NOT mutually exclusive —
+/// their YES probs can and do sum to > 1 legitimately.  We guard against
+/// this by only acting when there are exactly 2 siblings AND their sum is
+/// between 0.5 and 1.5 (plausibly a mutex pair, not a totals fan-out).
 pub struct CrossMarketChecker {
     tolerance: Decimal,
 }
@@ -45,7 +47,10 @@ impl CrossMarketChecker {
         let mut adjusted = quotes;
 
         for (event_ticker, indices) in &event_groups {
-            if indices.len() < 2 {
+            // Only handle true mutex pairs (exactly 2 sibling markets).
+            // Sports totals/spreads fan-out into many markets under one event —
+            // they are NOT mutex and must not be summed to 1.
+            if indices.len() != 2 {
                 continue;
             }
 
@@ -63,7 +68,18 @@ impl CrossMarketChecker {
                 }
             }
 
-            if mid_prices.is_empty() {
+            if mid_prices.len() != 2 {
+                continue;
+            }
+
+            // Sanity: a mutex pair should sum to ~0.9–1.1.
+            // If sum is wildly off (e.g. 2.25 for sports totals), skip.
+            if prob_sum < dec!(0.70) || prob_sum > dec!(1.30) {
+                debug!(
+                    event = %event_ticker,
+                    prob_sum = %prob_sum,
+                    "Cross-market: skipping non-mutex pair (prob_sum out of range)"
+                );
                 continue;
             }
 
@@ -77,26 +93,24 @@ impl CrossMarketChecker {
                 event = %event_ticker,
                 prob_sum = %prob_sum,
                 excess = %excess,
-                siblings = mid_prices.len(),
-                "Cross-market inconsistency detected"
+                "Cross-market consistency adjustment"
             );
 
-            // Distribute the adjustment proportionally across siblings
-            let adjustment_per_market = excess / Decimal::from(mid_prices.len() as i64);
+            // Shift each side by half the excess
+            let shift = (excess / dec!(2)).abs().min(dec!(0.02));
 
             for &(idx, _mid) in &mid_prices {
                 let q = &mut adjusted[idx];
 
                 if excess > Decimal::ZERO {
-                    // Overpriced as a group: widen asks (raise them) to reduce exposure
+                    // Both markets together are "overpriced" vs 1.0 sum
+                    // → widen each ask slightly
                     if let Some(ref mut ask) = q.yes_ask {
-                        let shift = adjustment_per_market.abs().min(dec!(0.03));
                         ask.price += shift;
                     }
                 } else {
-                    // Underpriced as a group: tighten bids (raise them) to capture value
+                    // Sum < 1.0: "underpriced" → tighten each bid slightly
                     if let Some(ref mut bid) = q.yes_bid {
-                        let shift = adjustment_per_market.abs().min(dec!(0.03));
                         bid.price += shift;
                     }
                 }

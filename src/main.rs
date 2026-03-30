@@ -392,7 +392,22 @@ async fn run_trading_loop(
     let mut rescan_tick = tokio::time::interval(rescan_interval);
     rescan_tick.tick().await; // consume the immediate first tick
 
+    // Periodic order state sync: re-fetch resting orders every 2 minutes to
+    // purge stale orders that Kalshi cancelled (market settlement, etc.)
+    // when WS events were missed.
+    let mut order_sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(120));
+    order_sync_tick.tick().await; // consume immediate first tick
+
     let max_markets = cfg.trading.max_markets_active;
+
+    // Markets that have returned `invalid_order` repeatedly are blacklisted
+    // for the current session so we stop wasting API calls on them.
+    let mut skip_markets: std::collections::HashSet<types::MarketTicker> =
+        std::collections::HashSet::new();
+    // Track consecutive failures per market; blacklist after threshold.
+    let mut market_failures: std::collections::HashMap<types::MarketTicker, u32> =
+        std::collections::HashMap::new();
+    const BLACKLIST_THRESHOLD: u32 = 3;
 
     tracing::info!(
         markets = target_markets.len(),
@@ -424,6 +439,35 @@ async fn run_trading_loop(
                     None => {
                         tracing::error!("Event channel closed in trading loop");
                         break;
+                    }
+                }
+            }
+            _ = order_sync_tick.tick() => {
+                // Sync open order state with exchange to drop stale orders
+                // (settled markets cancel all orders server-side; WS sometimes misses it)
+                match rest_client.get_orders(Some("resting")).await {
+                    Ok(live_orders) => {
+                        let live_ids: std::collections::HashSet<String> =
+                            live_orders.iter().map(|o| o.order_id.clone()).collect();
+                        let mut engine = state_engine.write().await;
+                        let stale: Vec<String> = engine
+                            .open_orders()
+                            .keys()
+                            .filter(|id| !live_ids.contains(*id))
+                            .cloned()
+                            .collect();
+                        if !stale.is_empty() {
+                            tracing::info!(
+                                count = stale.len(),
+                                "Pruning stale orders not present on exchange"
+                            );
+                            for id in &stale {
+                                engine.remove_order(id);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Periodic order sync failed");
                     }
                 }
             }
@@ -520,14 +564,31 @@ async fn run_trading_loop(
                     &event_detector,
                     &cross_market_checker,
                     max_markets,
+                    &skip_markets,
                 );
 
                 drop(engine);
 
                 let engine = state_engine.read().await;
-                execution_engine
+                let failed_markets = execution_engine
                     .reconcile(&engine, &target_quotes)
                     .await;
+                drop(engine);
+
+                // Blacklist markets that repeatedly return invalid_order.
+                // This prevents hammering the API on markets that are closed/settled.
+                for market in failed_markets {
+                    let count = market_failures.entry(market.clone()).or_insert(0);
+                    *count += 1;
+                    if *count >= BLACKLIST_THRESHOLD {
+                        tracing::warn!(
+                            market = %market,
+                            failures = count,
+                            "Blacklisting market after repeated invalid_order errors"
+                        );
+                        skip_markets.insert(market);
+                    }
+                }
             }
         }
     }
@@ -676,12 +737,18 @@ fn compute_target_quotes(
     event_detector: &event_detector::EventDetector,
     cross_market: &cross_market::CrossMarketChecker,
     max_markets: u32,
+    skip_markets: &std::collections::HashSet<types::MarketTicker>,
 ) -> Vec<types::TargetQuote> {
     let balance = state.balance().clone();
     let all_tickers: Vec<types::MarketTicker> = state.books().keys().cloned().collect();
 
     let mut quotes = Vec::new();
     for ticker in &all_tickers {
+        // Skip markets that have been blacklisted (e.g. persistent invalid_order)
+        if skip_markets.contains(ticker) {
+            continue;
+        }
+
         let book = match state.get_book(ticker) {
             Some(b) => b,
             None => continue,
@@ -689,9 +756,32 @@ fn compute_target_quotes(
 
         let position = state.get_position(ticker);
         let meta = state.get_market_meta(ticker);
+
+        // Require metadata: without it we have no expiry guard or tick info.
+        // This catches markets whose API data wasn't loaded at startup.
+        let meta = match meta {
+            Some(m) => m,
+            None => {
+                tracing::debug!(market = %ticker, "Skipping market: no metadata loaded");
+                continue;
+            }
+        };
+
+        // Guard: don't quote markets whose close_time has already passed
+        // or that are within 30 minutes of expiry.
+        let hours = meta.hours_to_expiry();
+        if hours < 0.5 {
+            tracing::debug!(
+                market = %ticker,
+                hours = hours,
+                "Skipping market: too close to expiry or already closed"
+            );
+            continue;
+        }
+
         let trade_sign = state.recent_trade_sign(ticker);
 
-        let fv = match fv_engine.compute(ticker, book, position, trade_sign, meta) {
+        let fv = match fv_engine.compute(ticker, book, position, trade_sign, Some(meta)) {
             Some(fv) => fv,
             None => continue,
         };
@@ -701,7 +791,7 @@ fn compute_target_quotes(
             &fv,
             book,
             position,
-            meta,
+            Some(meta),
             &balance,
             max_markets,
         );

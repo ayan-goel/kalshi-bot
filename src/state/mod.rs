@@ -301,6 +301,12 @@ impl StateEngine {
         }
     }
 
+    /// Remove an order from the in-memory state by order ID (e.g. when we detect
+    /// on a periodic sync that the exchange no longer has it resting).
+    pub fn remove_order(&mut self, order_id: &str) {
+        self.open_orders.remove(order_id);
+    }
+
     pub fn upsert_position(&mut self, pos: Position) {
         self.positions.insert(pos.market_ticker.clone(), pos);
     }
