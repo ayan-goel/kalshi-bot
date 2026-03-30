@@ -450,32 +450,113 @@ fn default_limit() -> i64 {
     100
 }
 
+fn default_offset() -> i64 {
+    0
+}
+
+fn clamp_limit(limit: i64) -> i64 {
+    limit.clamp(1, 1000)
+}
+
 pub async fn get_fills(
     State(state): State<AppState>,
     Query(q): Query<LimitQuery>,
 ) -> impl IntoResponse {
-    let fills = crate::db::get_recent_fills(&state.db_pool, q.limit)
+    let fills = crate::db::get_recent_fills(&state.db_pool, clamp_limit(q.limit))
         .await
         .unwrap_or_default();
     Json(fills)
 }
 
+#[derive(Deserialize)]
+pub struct PageQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default = "default_offset")]
+    pub offset: i64,
+}
+
+#[derive(Serialize)]
+pub struct PageResponse<T> {
+    pub items: Vec<T>,
+    pub limit: i64,
+    pub offset: i64,
+    pub next_offset: Option<i64>,
+}
+
 pub async fn get_risk_events(
     State(state): State<AppState>,
-    Query(q): Query<LimitQuery>,
+    Query(q): Query<PageQuery>,
 ) -> impl IntoResponse {
-    let events = crate::db::get_risk_events(&state.db_pool, q.limit)
+    let limit = clamp_limit(q.limit);
+    let offset = q.offset.max(0);
+    let events = crate::db::get_risk_events(&state.db_pool, limit, offset)
         .await
         .unwrap_or_default();
-    Json(events)
+    let next_offset = if events.len() as i64 == limit {
+        Some(offset + limit)
+    } else {
+        None
+    };
+    Json(PageResponse {
+        items: events,
+        limit,
+        offset,
+        next_offset,
+    })
 }
 
 pub async fn get_strategy_decisions(
     State(state): State<AppState>,
-    Query(q): Query<LimitQuery>,
+    Query(q): Query<PageQuery>,
 ) -> impl IntoResponse {
-    let decisions = crate::db::get_strategy_decisions(&state.db_pool, q.limit)
+    let limit = clamp_limit(q.limit);
+    let offset = q.offset.max(0);
+    let decisions = crate::db::get_strategy_decisions(&state.db_pool, limit, offset)
         .await
         .unwrap_or_default();
-    Json(decisions)
+    let next_offset = if decisions.len() as i64 == limit {
+        Some(offset + limit)
+    } else {
+        None
+    };
+    Json(PageResponse {
+        items: decisions,
+        limit,
+        offset,
+        next_offset,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct RawLogsQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub before_id: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct RawLogsResponse {
+    pub items: Vec<crate::log_buffer::RawLogEntry>,
+    pub limit: i64,
+    pub next_before_id: Option<u64>,
+}
+
+pub async fn get_raw_logs(
+    State(state): State<AppState>,
+    Query(q): Query<RawLogsQuery>,
+) -> impl IntoResponse {
+    let limit = clamp_limit(q.limit) as usize;
+    let items = match q.before_id {
+        Some(before_id) => state.log_buffer.before(before_id, limit),
+        None => state.log_buffer.latest(limit),
+    };
+    let next_before_id = items.last().map(|entry| entry.id);
+
+    Json(RawLogsResponse {
+        items,
+        limit: limit as i64,
+        next_before_id,
+    })
 }

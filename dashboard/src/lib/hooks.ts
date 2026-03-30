@@ -69,19 +69,28 @@ export function useFills(limit = 100) {
   });
 }
 
-export function useRiskEvents(limit = 100) {
+export function useRiskEvents(limit = 100, offset = 0) {
   return useQuery({
-    queryKey: ["riskEvents", limit],
-    queryFn: () => api.getRiskEvents(limit),
+    queryKey: ["riskEvents", limit, offset],
+    queryFn: () => api.getRiskEvents(limit, offset),
     refetchInterval: 10000,
   });
 }
 
-export function useStrategyDecisions(limit = 100) {
+export function useStrategyDecisions(limit = 100, offset = 0) {
   return useQuery({
-    queryKey: ["strategyDecisions", limit],
-    queryFn: () => api.getStrategyDecisions(limit),
+    queryKey: ["strategyDecisions", limit, offset],
+    queryFn: () => api.getStrategyDecisions(limit, offset),
     refetchInterval: 10000,
+  });
+}
+
+export function useRawLogs(limit = 100, beforeId?: number) {
+  return useQuery({
+    queryKey: ["rawLogs", limit, beforeId ?? null],
+    queryFn: () => api.getRawLogs(limit, beforeId),
+    // Keep newest logs auto-refreshing; older pages are static.
+    refetchInterval: beforeId ? false : 2000,
   });
 }
 

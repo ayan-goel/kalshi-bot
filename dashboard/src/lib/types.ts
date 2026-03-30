@@ -99,12 +99,34 @@ export interface RiskEvent {
   payload: unknown;
 }
 
+export interface OffsetPage<T> {
+  items: T[];
+  limit: number;
+  offset: number;
+  next_offset: number | null;
+}
+
 export interface StrategyDecision {
   ts: string;
   market_ticker: string;
   fair_value: string;
   inventory: string;
   reason: string;
+}
+
+export interface RawLogEntry {
+  id: number;
+  ts: string;
+  level: string;
+  target: string;
+  message: string;
+  fields: Record<string, unknown>;
+}
+
+export interface CursorPage<T> {
+  items: T[];
+  limit: number;
+  next_before_id: number | null;
 }
 
 export interface StrategyConfig {

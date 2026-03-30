@@ -420,7 +420,7 @@ pub struct RiskEventRow {
     pub payload: Option<serde_json::Value>,
 }
 
-pub async fn get_risk_events(pool: &PgPool, limit: i64) -> Result<Vec<RiskEventRow>> {
+pub async fn get_risk_events(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<RiskEventRow>> {
     let rows: Vec<(
         chrono::DateTime<chrono::Utc>,
         String,
@@ -429,9 +429,10 @@ pub async fn get_risk_events(pool: &PgPool, limit: i64) -> Result<Vec<RiskEventR
         String,
         Option<serde_json::Value>,
     )> = sqlx::query_as(
-        "SELECT ts, severity, component, market_ticker, message, payload FROM risk_events ORDER BY ts DESC LIMIT $1",
+        "SELECT ts, severity, component, market_ticker, message, payload FROM risk_events ORDER BY ts DESC LIMIT $1 OFFSET $2",
     )
     .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .context("Failed to read risk_events")?;
@@ -460,11 +461,16 @@ pub struct StrategyDecisionRow {
     pub reason: String,
 }
 
-pub async fn get_strategy_decisions(pool: &PgPool, limit: i64) -> Result<Vec<StrategyDecisionRow>> {
+pub async fn get_strategy_decisions(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<StrategyDecisionRow>> {
     let rows: Vec<(chrono::DateTime<chrono::Utc>, String, Decimal, Decimal, String)> = sqlx::query_as(
-        "SELECT ts, market_ticker, fair_value, inventory, reason FROM strategy_decisions ORDER BY ts DESC LIMIT $1",
+        "SELECT ts, market_ticker, fair_value, inventory, reason FROM strategy_decisions ORDER BY ts DESC LIMIT $1 OFFSET $2",
     )
     .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .context("Failed to read strategy_decisions")?;

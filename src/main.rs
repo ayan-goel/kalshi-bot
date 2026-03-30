@@ -5,6 +5,7 @@ mod db;
 mod exchange;
 mod execution;
 mod fair_value;
+mod log_buffer;
 mod orderbook;
 mod risk;
 mod state;
@@ -17,7 +18,8 @@ use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use std::path::Path;
 use tokio::sync::{broadcast, mpsc, RwLock};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::Layer;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use api::ws::WsEvent;
 use bot_state::{BotState, BotStateMachine};
@@ -27,15 +29,17 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     let config = config::AppConfig::load(Path::new("config/default.yaml"))?;
+    let log_buffer = log_buffer::LogBuffer::from_env(10_000);
 
     if config.logging.json {
-        fmt()
-            .json()
-            .with_env_filter(EnvFilter::from_default_env())
+        tracing_subscriber::registry()
+            .with(fmt::layer().json().with_filter(EnvFilter::from_default_env()))
+            .with(log_buffer::LogBufferLayer::new(log_buffer.clone()))
             .init();
     } else {
-        fmt()
-            .with_env_filter(EnvFilter::from_default_env())
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_filter(EnvFilter::from_default_env()))
+            .with(log_buffer::LogBufferLayer::new(log_buffer.clone()))
             .init();
     }
 
@@ -75,6 +79,7 @@ async fn main() -> Result<()> {
         db_pool: db_pool.clone(),
         event_tx: event_broadcast.clone(),
         bot_cmd_tx,
+        log_buffer: log_buffer.clone(),
         api_secret,
     };
 
@@ -308,6 +313,12 @@ async fn run_trading_loop(
 ) {
     let cfg = config.read().await.clone();
 
+    // Ensure each run starts from a clean in-memory state.
+    {
+        let mut engine = state_engine.write().await;
+        engine.clear_all();
+    }
+
     // Create REST client
     let rest_client = match create_rest_client(&cfg) {
         Ok(c) => c,
@@ -500,13 +511,20 @@ async fn reconcile_startup(
     }
 
     tracing::info!("Step 4/4: Selecting target markets...");
-    let target_markets = if config.trading.markets_allowlist.is_empty() {
-        let markets = rest_client.get_markets(Some("open"), Some(30)).await
+    let max_markets = config.trading.max_markets_active.max(1);
+    let mut target_markets = if config.trading.markets_allowlist.is_empty() {
+        let markets = rest_client
+            .get_markets(Some("open"), Some(max_markets))
+            .await
             .context("reconcile step 4: get_markets failed")?;
         markets.into_iter().map(|m| m.ticker).collect::<Vec<_>>()
     } else {
         config.trading.markets_allowlist.clone()
     };
+
+    if target_markets.len() > max_markets as usize {
+        target_markets.truncate(max_markets as usize);
+    }
 
     tracing::info!(count = target_markets.len(), "Target markets selected");
     for ticker in &target_markets {

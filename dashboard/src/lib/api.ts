@@ -9,6 +9,9 @@ import type {
   FillInfo,
   RiskEvent,
   StrategyDecision,
+  OffsetPage,
+  RawLogEntry,
+  CursorPage,
   BotConfig,
   EnvironmentInfo,
   StrategyConfig,
@@ -73,10 +76,20 @@ export const api = {
   getPositions: () => apiFetch<PositionInfo[]>("/api/positions"),
   getFills: (limit = 100) =>
     apiFetch<FillInfo[]>(`/api/fills?limit=${limit}`),
-  getRiskEvents: (limit = 100) =>
-    apiFetch<RiskEvent[]>(`/api/risk-events?limit=${limit}`),
-  getStrategyDecisions: (limit = 100) =>
-    apiFetch<StrategyDecision[]>(`/api/strategy-decisions?limit=${limit}`),
+  getRiskEvents: (limit = 100, offset = 0) =>
+    apiFetch<OffsetPage<RiskEvent>>(
+      `/api/risk-events?limit=${limit}&offset=${offset}`
+    ),
+  getStrategyDecisions: (limit = 100, offset = 0) =>
+    apiFetch<OffsetPage<StrategyDecision>>(
+      `/api/strategy-decisions?limit=${limit}&offset=${offset}`
+    ),
+  getRawLogs: (limit = 100, beforeId?: number) =>
+    apiFetch<CursorPage<RawLogEntry>>(
+      beforeId
+        ? `/api/raw-logs?limit=${limit}&before_id=${beforeId}`
+        : `/api/raw-logs?limit=${limit}`
+    ),
   getConfig: () => apiFetch<BotConfig>("/api/config"),
   getEnvironment: () => apiFetch<EnvironmentInfo>("/api/environment"),
 

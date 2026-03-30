@@ -200,12 +200,15 @@ impl StateEngine {
                 no_bids,
                 seq,
             } => {
-                let book = self
-                    .books
-                    .entry(market_ticker.clone())
-                    .or_insert_with(OrderBook::new);
-                book.apply_snapshot(yes_bids, no_bids, seq);
-                debug!(market = %market_ticker, seq = seq, "Book snapshot applied");
+                if let Some(book) = self.books.get_mut(&market_ticker) {
+                    book.apply_snapshot(yes_bids, no_bids, seq);
+                    debug!(market = %market_ticker, seq = seq, "Book snapshot applied");
+                } else {
+                    warn!(
+                        market = %market_ticker,
+                        "Ignoring snapshot for unknown market (outside active set)"
+                    );
+                }
             }
             ExchangeEvent::BookDelta {
                 market_ticker,
@@ -214,11 +217,14 @@ impl StateEngine {
                 delta,
                 seq,
             } => {
-                let book = self
-                    .books
-                    .entry(market_ticker.clone())
-                    .or_insert_with(OrderBook::new);
-                book.apply_delta(side, price, delta, seq);
+                if let Some(book) = self.books.get_mut(&market_ticker) {
+                    book.apply_delta(side, price, delta, seq);
+                } else {
+                    warn!(
+                        market = %market_ticker,
+                        "Ignoring delta for unknown market (outside active set)"
+                    );
+                }
             }
             ExchangeEvent::Trade {
                 market_ticker,

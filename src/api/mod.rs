@@ -26,6 +26,7 @@ pub struct AppState {
     pub db_pool: sqlx::PgPool,
     pub event_tx: EventBroadcast,
     pub bot_cmd_tx: tokio::sync::mpsc::Sender<BotCommand>,
+    pub log_buffer: crate::log_buffer::LogBuffer,
     pub api_secret: Option<String>,
 }
 
@@ -101,6 +102,7 @@ pub fn create_router(app_state: AppState) -> axum::Router {
         .route("/api/fills", get(routes::get_fills))
         .route("/api/risk-events", get(routes::get_risk_events))
         .route("/api/strategy-decisions", get(routes::get_strategy_decisions))
+        .route("/api/raw-logs", get(routes::get_raw_logs))
         .route("/api/ws", get(ws::ws_handler))
         .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
             let s = secret.clone();
