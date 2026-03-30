@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
+  <rect width="40" height="40" rx="8" fill="#00D298"/>
+  <!-- K letterform -->
+  <path d="M12 10h4v8.5l7.5-8.5H28l-8.5 9.5L28 30h-4.5l-7-8.5V30H12V10z" fill="white"/>
+</svg>

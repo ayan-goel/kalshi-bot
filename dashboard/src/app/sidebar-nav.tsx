@@ -8,8 +8,8 @@ import {
   BarChart3,
   FileText,
   ShieldAlert,
-  Activity,
 } from "lucide-react";
+import Image from "next/image";
 import { StatusBadge } from "@/components/status-badge";
 import { useStatus, useBotWebSocket } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -31,9 +31,13 @@ export function SidebarNav() {
     <aside className="w-60 border-r border-[#1e1e2e] bg-[#0d0d14] flex flex-col min-h-screen">
       <div className="px-5 py-5 border-b border-[#1e1e2e]">
         <div className="flex items-center gap-2.5">
-          <div className="h-8 w-8 rounded-lg bg-indigo-500/20 flex items-center justify-center">
-            <Activity className="h-4 w-4 text-indigo-400" />
-          </div>
+          <Image
+            src="/kalshi-mark.svg"
+            alt="Kalshi"
+            width={32}
+            height={32}
+            className="rounded-lg"
+          />
           <div>
             <h1 className="font-semibold text-sm text-zinc-100 tracking-tight">
               Kalshi Bot

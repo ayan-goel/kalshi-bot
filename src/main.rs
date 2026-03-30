@@ -13,7 +13,7 @@ mod types;
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use std::path::Path;
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -331,13 +331,14 @@ async fn run_trading_loop(
             tracing::info!("Startup reconciliation complete");
         }
         Err(e) => {
-            tracing::error!(error = %e, "Startup reconciliation failed");
+            let full_err = format!("{e:#}");
+            tracing::error!(error = %full_err, "Startup reconciliation failed");
             let mut bsm = bot_state.write().await;
             let _ = bsm
                 .transition(
                     BotState::Error,
                     "reconciliation_failed",
-                    Some(serde_json::json!({ "message": e.to_string() })),
+                    Some(serde_json::json!({ "message": full_err })),
                 )
                 .await;
             return;
@@ -470,7 +471,9 @@ async fn reconcile_startup(
     state_engine: &api::SharedState,
     config: &config::AppConfig,
 ) -> Result<()> {
-    let balance = rest_client.get_balance().await?;
+    tracing::info!("Step 1/4: Fetching account balance...");
+    let balance = rest_client.get_balance().await
+        .context("reconcile step 1: get_balance failed")?;
     tracing::info!(
         available = %balance.available,
         portfolio_value = %balance.portfolio_value,
@@ -480,21 +483,26 @@ async fn reconcile_startup(
     let mut engine = state_engine.write().await;
     engine.set_balance(balance);
 
-    let open_orders = rest_client.get_orders(Some("resting")).await?;
+    tracing::info!("Step 2/4: Fetching open orders...");
+    let open_orders = rest_client.get_orders(Some("resting")).await
+        .context("reconcile step 2: get_orders failed")?;
     tracing::info!(count = open_orders.len(), "Reconciled open orders");
     for order in &open_orders {
         engine.upsert_order(order.clone());
     }
 
-    let positions = rest_client.get_positions().await?;
+    tracing::info!("Step 3/4: Fetching positions...");
+    let positions = rest_client.get_positions().await
+        .context("reconcile step 3: get_positions failed")?;
     tracing::info!(count = positions.len(), "Reconciled positions");
     for pos in positions {
         engine.upsert_position(pos);
     }
 
-    // Set up target markets
+    tracing::info!("Step 4/4: Selecting target markets...");
     let target_markets = if config.trading.markets_allowlist.is_empty() {
-        let markets = rest_client.get_markets(Some("open"), Some(30)).await?;
+        let markets = rest_client.get_markets(Some("open"), Some(30)).await
+            .context("reconcile step 4: get_markets failed")?;
         markets.into_iter().map(|m| m.ticker).collect::<Vec<_>>()
     } else {
         config.trading.markets_allowlist.clone()

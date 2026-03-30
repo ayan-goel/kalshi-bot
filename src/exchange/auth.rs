@@ -85,30 +85,42 @@ impl KalshiAuth {
         })
     }
 
-    /// Resolve auth from config, checking env vars in priority order:
-    /// 1. KALSHI_PRIVATE_KEY (raw PEM in env var)
-    /// 2. KALSHI_PRIVATE_KEY_BASE64 (base64-encoded PEM)
-    /// 3. KALSHI_PRIVATE_KEY_PATH (file path)
+    /// Resolve auth from config, using environment-specific credentials.
+    ///
+    /// Demo mode reads: KALSHI_API_KEY + KALSHI_PRIVATE_KEY
+    /// Production mode reads: KALSHI_PROD_API_KEY + KALSHI_PROD_PRIVATE_KEY
+    ///
+    /// For each set, the private key lookup order is:
+    ///   1. Raw PEM env var (e.g. KALSHI_PRIVATE_KEY)
+    ///   2. Base64 env var (e.g. KALSHI_PRIVATE_KEY_BASE64)
+    ///   3. File path env var
     pub fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
-        let api_key = config.api_key()?;
+        let is_prod = config.environment == "production";
+        let (api_key_var, pk_var, pk_b64_var) = if is_prod {
+            ("KALSHI_PROD_API_KEY", "KALSHI_PROD_PRIVATE_KEY", "KALSHI_PROD_PRIVATE_KEY_BASE64")
+        } else {
+            ("KALSHI_API_KEY", "KALSHI_PRIVATE_KEY", "KALSHI_PRIVATE_KEY_BASE64")
+        };
 
-        // 1. Try raw PEM from env var
-        if let Ok(raw_pem) = std::env::var("KALSHI_PRIVATE_KEY") {
+        let api_key = std::env::var(api_key_var)
+            .with_context(|| format!("Missing env var {api_key_var} (environment: {})", config.environment))?;
+
+        if let Ok(raw_pem) = std::env::var(pk_var) {
             return Self::from_pem(api_key, &raw_pem);
         }
 
-        // 2. Try base64
-        if let Ok(b64) = std::env::var("KALSHI_PRIVATE_KEY_BASE64") {
+        if let Ok(b64) = std::env::var(pk_b64_var) {
             return Self::from_base64(api_key, &b64);
         }
 
-        // 3. Try file path
+        // Fallback: file path
         if let Ok(path) = std::env::var(&config.exchange.private_key_path_env) {
             return Self::new(api_key, &path);
         }
 
         anyhow::bail!(
-            "No private key found. Set one of: KALSHI_PRIVATE_KEY, KALSHI_PRIVATE_KEY_BASE64, or {}",
+            "No private key found for {} environment. Set one of: {pk_var}, {pk_b64_var}, or {}",
+            config.environment,
             config.exchange.private_key_path_env
         )
     }
