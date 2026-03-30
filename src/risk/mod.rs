@@ -27,8 +27,10 @@ impl RiskEngine {
 
     /// Check if kill switch should trigger. Returns None if OK, Some(reason) if triggered.
     pub fn kill_switch_check(&self, state: &StateEngine) -> Option<String> {
-        // Check connectivity
+        // Only trigger disconnect kill switch if the WS was connected at least once,
+        // otherwise it fires during the initial connection race on startup.
         if self.cancel_all_on_disconnect
+            && state.ever_connected()
             && state.connectivity() == ConnectivityState::Disconnected
         {
             return Some("Exchange disconnected".to_string());

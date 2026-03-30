@@ -14,6 +14,7 @@ pub struct StateEngine {
     positions: HashMap<MarketTicker, Position>,
     balance: Balance,
     connectivity: ConnectivityState,
+    ever_connected: bool,
     daily_pnl: Decimal,
     db_pool: PgPool,
     recent_trades: HashMap<MarketTicker, Vec<RecentTrade>>,
@@ -50,6 +51,7 @@ impl StateEngine {
                 portfolio_value: Decimal::ZERO,
             },
             connectivity: ConnectivityState::Disconnected,
+            ever_connected: false,
             daily_pnl: Decimal::ZERO,
             db_pool,
             recent_trades: HashMap::new(),
@@ -78,6 +80,10 @@ impl StateEngine {
 
     pub fn connectivity(&self) -> ConnectivityState {
         self.connectivity
+    }
+
+    pub fn ever_connected(&self) -> bool {
+        self.ever_connected
     }
 
     pub fn open_orders(&self) -> &HashMap<String, LiveOrder> {
@@ -181,6 +187,7 @@ impl StateEngine {
             portfolio_value: Decimal::ZERO,
         };
         self.connectivity = ConnectivityState::Disconnected;
+        self.ever_connected = false;
         self.daily_pnl = Decimal::ZERO;
         self.recent_trades.clear();
     }
@@ -351,6 +358,7 @@ impl StateEngine {
             ExchangeEvent::Connected => {
                 info!("Exchange connected");
                 self.connectivity = ConnectivityState::Connected;
+                self.ever_connected = true;
             }
             ExchangeEvent::Disconnected => {
                 warn!("Exchange disconnected");
