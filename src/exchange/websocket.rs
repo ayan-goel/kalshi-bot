@@ -341,7 +341,7 @@ async fn handle_ws_message(
                     .await?;
             }
         }
-        "user_orders" => {
+        "user_order" | "user_orders" => {
             if let Some(msg) = ws_msg.msg {
                 let order_id = msg
                     .get("order_id")

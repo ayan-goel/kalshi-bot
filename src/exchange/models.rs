@@ -32,15 +32,15 @@ pub struct MarketsListResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OrderbookResponse {
-    pub orderbook: OrderbookData,
+    pub orderbook_fp: OrderbookDataFp,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct OrderbookData {
+pub struct OrderbookDataFp {
     #[serde(default)]
-    pub yes: Option<Vec<Vec<serde_json::Value>>>,
+    pub yes_dollars: Option<Vec<Vec<String>>>,
     #[serde(default)]
-    pub no: Option<Vec<Vec<serde_json::Value>>>,
+    pub no_dollars: Option<Vec<Vec<String>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +48,8 @@ pub struct CreateOrderRequest {
     pub ticker: String,
     pub side: String,
     pub action: String,
+    #[serde(rename = "type")]
+    pub order_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,19 +116,30 @@ pub struct OrdersListResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FillResponse {
+    #[serde(alias = "fill_id")]
     pub trade_id: String,
     pub order_id: String,
+    #[serde(alias = "market_ticker")]
     pub ticker: String,
     pub side: String,
     pub action: String,
     #[serde(default)]
-    pub yes_price: Option<i64>,
+    pub yes_price_dollars: Option<String>,
     #[serde(default)]
-    pub count: Option<i64>,
+    pub no_price_dollars: Option<String>,
+    #[serde(default)]
+    pub count_fp: Option<String>,
+    #[serde(default)]
+    pub fee_cost: Option<String>,
     #[serde(default)]
     pub is_taker: Option<bool>,
     #[serde(default)]
     pub created_time: Option<String>,
+    // Legacy integer fields (deprecated, kept as fallback)
+    #[serde(default)]
+    pub yes_price: Option<i64>,
+    #[serde(default)]
+    pub count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +151,15 @@ pub struct FillsListResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PositionResponse {
     pub ticker: String,
+    #[serde(default)]
+    pub position_fp: Option<String>,
+    #[serde(default)]
+    pub market_exposure_dollars: Option<String>,
+    #[serde(default)]
+    pub realized_pnl_dollars: Option<String>,
+    #[serde(default)]
+    pub total_traded_dollars: Option<String>,
+    // Legacy integer fields (deprecated, kept as fallback)
     #[serde(default)]
     pub position: Option<i64>,
     #[serde(default)]
@@ -155,13 +177,36 @@ pub struct PositionsListResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BatchCancelOrderItem {
+    pub order_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct BatchCancelRequest {
-    pub order_ids: Vec<String>,
+    pub orders: Vec<BatchCancelOrderItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchCancelIndividualResponse {
+    pub order_id: String,
+    #[serde(default)]
+    pub order: Option<OrderResponse>,
+    #[serde(default)]
+    pub reduced_by_fp: Option<String>,
+    #[serde(default)]
+    pub error: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BatchCancelResponse {
-    pub orders: Vec<OrderResponse>,
+    pub orders: Vec<BatchCancelIndividualResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CancelOrderResponse {
+    pub order: OrderResponse,
+    #[serde(default)]
+    pub reduced_by_fp: Option<String>,
 }
 
 // ── WebSocket message models ──

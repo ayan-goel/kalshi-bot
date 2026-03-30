@@ -135,19 +135,31 @@ impl KalshiRestClient {
             .market_positions
             .into_iter()
             .map(|p| {
-                let pos = p.position.unwrap_or(0);
-                let (yes_c, no_c) = if pos >= 0 {
-                    (Decimal::from(pos), Decimal::ZERO)
+                let pos: Decimal = p
+                    .position_fp
+                    .as_deref()
+                    .and_then(|s| s.parse::<Decimal>().ok())
+                    .unwrap_or_else(|| Decimal::from(p.position.unwrap_or(0)));
+
+                let (yes_c, no_c) = if pos >= Decimal::ZERO {
+                    (pos, Decimal::ZERO)
                 } else {
-                    (Decimal::ZERO, Decimal::from(-pos))
+                    (Decimal::ZERO, pos.abs())
                 };
+
+                let realized_pnl = p
+                    .realized_pnl_dollars
+                    .as_deref()
+                    .and_then(|s| s.parse::<Decimal>().ok())
+                    .unwrap_or_else(|| Decimal::new(p.realized_pnl.unwrap_or(0), 2));
+
                 Position {
                     market_ticker: MarketTicker::from(p.ticker.as_str()),
                     yes_contracts: yes_c,
                     no_contracts: no_c,
                     avg_yes_price: None,
                     avg_no_price: None,
-                    realized_pnl: Decimal::new(p.realized_pnl.unwrap_or(0), 2),
+                    realized_pnl,
                     unrealized_pnl: Decimal::ZERO,
                 }
             })
@@ -187,8 +199,8 @@ impl KalshiRestClient {
     pub async fn cancel_order(&self, order_id: &str) -> Result<OrderResponse> {
         debug!(order_id = %order_id, "Cancelling order");
         let resp = self.delete(&format!("/portfolio/orders/{order_id}")).await?;
-        let data: OrderResponse = resp.json().await?;
-        Ok(data)
+        let data: CancelOrderResponse = resp.json().await?;
+        Ok(data.order)
     }
 
     #[instrument(skip(self))]
@@ -205,7 +217,12 @@ impl KalshiRestClient {
         let full_path = "/trade-api/v2/portfolio/orders/batched";
         let headers = self.auth.sign_request("DELETE", full_path);
 
-        let body = BatchCancelRequest { order_ids };
+        let body = BatchCancelRequest {
+            orders: order_ids
+                .into_iter()
+                .map(|id| BatchCancelOrderItem { order_id: id })
+                .collect(),
+        };
 
         let resp = self
             .http
@@ -227,7 +244,11 @@ impl KalshiRestClient {
         }
 
         let data: BatchCancelResponse = resp.json().await?;
-        Ok(data.orders)
+        Ok(data
+            .orders
+            .into_iter()
+            .filter_map(|item| item.order)
+            .collect())
     }
 
     // ── Market endpoints ──
@@ -249,11 +270,11 @@ impl KalshiRestClient {
     }
 
     #[instrument(skip(self))]
-    pub async fn get_orderbook(&self, market_ticker: &str) -> Result<OrderbookData> {
+    pub async fn get_orderbook(&self, market_ticker: &str) -> Result<OrderbookDataFp> {
         let resp = self
             .get(&format!("/markets/{market_ticker}/orderbook"))
             .await?;
         let data: OrderbookResponse = resp.json().await?;
-        Ok(data.orderbook)
+        Ok(data.orderbook_fp)
     }
 }

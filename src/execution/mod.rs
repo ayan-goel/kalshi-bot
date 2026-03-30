@@ -205,7 +205,16 @@ impl ExecutionEngine {
                     self.last_action_time.insert(ticker, Instant::now());
                 }
                 Err(e) => {
-                    warn!(ticker = %req.ticker, error = %e, "Order creation failed");
+                    warn!(
+                        ticker = %req.ticker,
+                        error = %e,
+                        side = %req.side,
+                        action = %req.action,
+                        yes_price = ?req.yes_price_dollars,
+                        no_price = ?req.no_price_dollars,
+                        count = ?req.count,
+                        "Order creation failed"
+                    );
                 }
             }
         }
@@ -265,16 +274,18 @@ fn build_create_request(
 ) -> CreateOrderRequest {
     let client_id = Uuid::new_v4().to_string();
 
-    // Kalshi API: price in dollars (string), count as integer
+    // Kalshi requires prices as fixed-point strings with exactly 4 decimal places
+    let price_str = format!("{:.4}", level.price);
     let (yes_price_dollars, no_price_dollars) = match side {
-        Side::Yes => (Some(level.price.to_string()), None),
-        Side::No => (None, Some(level.price.to_string())),
+        Side::Yes => (Some(price_str), None),
+        Side::No => (None, Some(price_str)),
     };
 
     CreateOrderRequest {
         ticker: market.0.clone(),
         side: side.to_string(),
         action: action.to_string(),
+        order_type: "limit".to_string(),
         count: Some(level.quantity.to_string().parse::<i64>().unwrap_or(1)),
         count_fp: Some(format!("{:.2}", level.quantity)),
         yes_price: None,
