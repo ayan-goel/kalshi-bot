@@ -21,11 +21,23 @@ const BOT_API_URL =
   process.env.BOT_API_URL ||
   "http://localhost:8080";
 
+const API_SECRET = process.env.NEXT_PUBLIC_BOT_API_SECRET || "";
+
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (API_SECRET) {
+    headers["Authorization"] = `Bearer ${API_SECRET}`;
+  }
+  return headers;
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BOT_API_URL}${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...authHeaders(),
       ...init?.headers,
     },
   });
@@ -34,6 +46,20 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`API ${path}: ${res.status} ${body}`);
   }
   return res.json() as Promise<T>;
+}
+
+export function getWsUrl(): string {
+  const base =
+    process.env.NEXT_PUBLIC_BOT_WS_URL ||
+    (typeof window !== "undefined"
+      ? `ws://${window.location.hostname}:8080/api/ws`
+      : "");
+  if (!base) return "";
+  if (API_SECRET) {
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}token=${API_SECRET}`;
+  }
+  return base;
 }
 
 export const api = {

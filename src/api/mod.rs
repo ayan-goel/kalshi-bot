@@ -4,6 +4,11 @@ pub mod ws;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use axum::extract::Request;
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::Response;
+
 use crate::bot_state::BotStateMachine;
 use crate::config::AppConfig;
 use crate::state::StateEngine;
@@ -21,6 +26,7 @@ pub struct AppState {
     pub db_pool: sqlx::PgPool,
     pub event_tx: EventBroadcast,
     pub bot_cmd_tx: tokio::sync::mpsc::Sender<BotCommand>,
+    pub api_secret: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,12 +37,51 @@ pub enum BotCommand {
     SwitchEnvironment { environment: String },
 }
 
+async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
+    let secret = req
+        .extensions()
+        .get::<Option<String>>()
+        .cloned()
+        .flatten();
+
+    if let Some(expected) = secret {
+        let auth_header = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        let token = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
+
+        // Also check query param for WebSocket connections (browsers can't set WS headers)
+        let query_token = req
+            .uri()
+            .query()
+            .and_then(|q| {
+                q.split('&')
+                    .find_map(|pair| pair.strip_prefix("token="))
+            })
+            .unwrap_or("");
+
+        if token != expected && query_token != expected {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    Ok(next.run(req).await)
+}
+
 pub fn create_router(app_state: AppState) -> axum::Router {
     use axum::routing::{get, post, put};
     use tower_http::cors::CorsLayer;
 
-    axum::Router::new()
-        .route("/api/health", get(routes::health))
+    let secret = app_state.api_secret.clone();
+
+    // Health endpoint is outside auth — Railway needs it for health checks
+    let health_route = axum::Router::new()
+        .route("/api/health", get(routes::health));
+
+    let protected_routes = axum::Router::new()
         .route("/api/status", get(routes::status))
         .route("/api/bot/start", post(routes::bot_start))
         .route("/api/bot/stop", post(routes::bot_stop))
@@ -57,6 +102,17 @@ pub fn create_router(app_state: AppState) -> axum::Router {
         .route("/api/risk-events", get(routes::get_risk_events))
         .route("/api/strategy-decisions", get(routes::get_strategy_decisions))
         .route("/api/ws", get(ws::ws_handler))
+        .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
+            let s = secret.clone();
+            async move {
+                let mut req = req;
+                req.extensions_mut().insert(s);
+                auth_middleware(req, next).await
+            }
+        }));
+
+    health_route
+        .merge(protected_routes)
         .layer(CorsLayer::permissive())
         .with_state(app_state)
 }

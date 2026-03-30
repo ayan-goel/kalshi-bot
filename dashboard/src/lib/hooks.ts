@@ -2,7 +2,7 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useCallback } from "react";
-import { api } from "./api";
+import { api, getWsUrl } from "./api";
 import type { WsMessage } from "./types";
 
 export function useStatus() {
@@ -100,21 +100,16 @@ export function useEnvironment() {
   });
 }
 
-const WS_URL =
-  typeof window !== "undefined"
-    ? (process.env.NEXT_PUBLIC_BOT_WS_URL ||
-        `ws://${window.location.hostname}:8080/api/ws`)
-    : "";
-
 export function useBotWebSocket() {
   const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
 
   const connect = useCallback(() => {
-    if (!WS_URL) return;
+    const wsUrl = getWsUrl();
+    if (!wsUrl) return;
     try {
-      const ws = new WebSocket(WS_URL);
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onmessage = (event) => {

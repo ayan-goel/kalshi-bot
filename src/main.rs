@@ -61,6 +61,13 @@ async fn main() -> Result<()> {
 
     let (bot_cmd_tx, bot_cmd_rx) = mpsc::channel::<api::BotCommand>(32);
 
+    let api_secret = std::env::var("BOT_API_SECRET").ok();
+    if api_secret.is_some() {
+        tracing::info!("API secret is set — all endpoints (except /api/health) require Bearer token");
+    } else {
+        tracing::warn!("BOT_API_SECRET is not set — API is unauthenticated!");
+    }
+
     let app_state = api::AppState {
         state_engine: state_engine.clone(),
         bot_state: bot_state_machine.clone(),
@@ -68,6 +75,7 @@ async fn main() -> Result<()> {
         db_pool: db_pool.clone(),
         event_tx: event_broadcast.clone(),
         bot_cmd_tx,
+        api_secret,
     };
 
     // Spawn Axum HTTP server
