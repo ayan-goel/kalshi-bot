@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::config::StrategyConfig;
 use crate::exchange::models::CreateOrderRequest;
 use crate::exchange::rest::KalshiRestClient;
+use crate::risk::RiskEngine;
 use crate::state::{LiveOrder, StateEngine};
 use crate::types::*;
 
@@ -87,6 +88,7 @@ impl ExecutionEngine {
         &mut self,
         state: &StateEngine,
         targets: &[TargetQuote],
+        risk_engine: &RiskEngine,
     ) -> Vec<MarketTicker> {
         let mut invalid_order_markets: Vec<MarketTicker> = Vec::new();
         // Build a map of desired quotes by market
@@ -118,12 +120,15 @@ impl ExecutionEngine {
             let target = desired.get(market);
 
             // Separate live orders into bid-side and ask-side
-            let live_bids: Vec<&LiveOrder> = live_orders
+            // Bug 15: sort for deterministic primary selection
+            let mut live_bids: Vec<&LiveOrder> = live_orders
                 .iter()
                 .filter(|o| o.action == Action::Buy && o.side == Side::Yes)
                 .copied()
                 .collect();
-            let live_asks: Vec<&LiveOrder> = live_orders
+            live_bids.sort_by(|a, b| b.price.cmp(&a.price)); // highest bid first
+
+            let mut live_asks: Vec<&LiveOrder> = live_orders
                 .iter()
                 .filter(|o| {
                     // Selling YES or buying NO are equivalent ask-side actions
@@ -132,6 +137,25 @@ impl ExecutionEngine {
                 })
                 .copied()
                 .collect();
+            live_asks.sort_by(|a, b| a.price.cmp(&b.price)); // lowest ask first
+
+            // Bug 14: cancel any orders that don't match bid or ask categories
+            // (e.g. Sell No) to prevent order leaks
+            let classified_ids: std::collections::HashSet<&str> = live_bids
+                .iter()
+                .chain(live_asks.iter())
+                .map(|o| o.order_id.as_str())
+                .collect();
+            for order in &live_orders {
+                if !classified_ids.contains(order.order_id.as_str()) {
+                    debug!(
+                        order_id = %order.order_id,
+                        market = %market,
+                        "Cancelling unclassified order to prevent leak"
+                    );
+                    cancels.push(order.order_id.clone());
+                }
+            }
 
             match target {
                 Some(tq) => {
@@ -186,20 +210,74 @@ impl ExecutionEngine {
             }
         }
 
-        // Execute cancels
+        // Execute cancels — Bug 2: fall back to per-order cancel if batch fails
         if !cancels.is_empty() {
             debug!(count = cancels.len(), "Executing cancels");
             for chunk in cancels.chunks(20) {
-                let _ = self
+                if let Err(e) = self
                     .rest_client
                     .batch_cancel_orders(chunk.to_vec())
-                    .await;
+                    .await
+                {
+                    warn!(
+                        error = %e,
+                        count = chunk.len(),
+                        "Batch cancel failed in reconcile, falling back to per-order"
+                    );
+                    for oid in chunk {
+                        if let Err(e2) = self.rest_client.cancel_order(oid).await {
+                            warn!(order_id = %oid, error = %e2, "Individual cancel failed in reconcile");
+                        }
+                    }
+                }
             }
         }
 
-        // Execute creates
+        // Execute creates — Bug 10: check risk approval before each order
         for req in &creates {
             let ticker = MarketTicker::from(req.ticker.as_str());
+
+            // Reconstruct typed values for the risk check
+            let side = match req.side.as_str() {
+                "yes" => Side::Yes,
+                _ => Side::No,
+            };
+            let order_action = match req.action.as_str() {
+                "buy" => Action::Buy,
+                _ => Action::Sell,
+            };
+            let price = req
+                .yes_price_dollars
+                .as_deref()
+                .or(req.no_price_dollars.as_deref())
+                .and_then(|s| s.parse::<Decimal>().ok())
+                .unwrap_or(Decimal::ZERO);
+            let quantity = req
+                .count
+                .map(Decimal::from)
+                .unwrap_or(Decimal::ONE);
+
+            let desired_action = DesiredAction::CreateOrder {
+                market_ticker: ticker.clone(),
+                side,
+                action: order_action,
+                price,
+                quantity,
+                client_order_id: req.client_order_id.clone().unwrap_or_default(),
+            };
+
+            match risk_engine.approve(&desired_action, state) {
+                RiskDecision::Approved => {}
+                RiskDecision::Rejected { reason } => {
+                    warn!(ticker = %ticker, reason = %reason, "Order rejected by risk engine");
+                    continue;
+                }
+                RiskDecision::KillSwitch { reason } => {
+                    warn!(ticker = %ticker, reason = %reason, "Kill switch from risk engine during create");
+                    continue;
+                }
+            }
+
             match self.rest_client.create_order(req).await {
                 Ok(resp) => {
                     info!(

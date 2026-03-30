@@ -24,11 +24,15 @@ pub async fn run_websocket(
         info!("Connecting to WebSocket...");
         match connect_and_stream(&config, &market_tickers, &event_tx).await {
             Ok(()) => {
+                // Only a clean shutdown (e.g. process exit) reaches here.
+                // Bug 1: abnormal exits now return Err so they don't reset backoff.
                 info!("WebSocket session ended cleanly");
                 reconnect_delay = Duration::from_secs(1);
             }
             Err(e) => {
-                error!(error = %e, "WebSocket error");
+                error!(error = %e, "WebSocket connection/stream error — reconnecting");
+                // Disconnected event already sent inside connect_and_stream on stream errors.
+                // For connection-level errors (e.g. connect_async failure) send it here.
                 let _ = event_tx.send(ExchangeEvent::Disconnected).await;
             }
         }
@@ -149,17 +153,23 @@ async fn connect_and_stream(
                     Some(Ok(tungstenite::Message::Ping(data))) => {
                         write.send(tungstenite::Message::Pong(data)).await?;
                     }
+                    // Bug 1: server-initiated close → send Disconnected and return Err for proper backoff
                     Some(Ok(tungstenite::Message::Close(_))) => {
                         info!("WebSocket closed by server");
-                        break;
+                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        return Err(anyhow::anyhow!("WebSocket closed by server"));
                     }
+                    // Bug 1: read error → send Disconnected and return Err for proper backoff
                     Some(Err(e)) => {
                         error!(error = %e, "WebSocket read error");
-                        break;
+                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        return Err(anyhow::anyhow!("WebSocket read error: {e}"));
                     }
+                    // Bug 1: stream ended unexpectedly → send Disconnected and return Err
                     None => {
                         info!("WebSocket stream ended");
-                        break;
+                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        return Err(anyhow::anyhow!("WebSocket stream ended unexpectedly"));
                     }
                     _ => {}
                 }
@@ -169,8 +179,6 @@ async fn connect_and_stream(
             }
         }
     }
-
-    Ok(())
 }
 
 async fn handle_ws_message(
@@ -181,7 +189,7 @@ async fn handle_ws_message(
     let ws_msg: WsMessage =
         serde_json::from_str(text).context("Failed to parse WS message")?;
 
-    // Track sequence numbers
+    // Track sequence numbers and trigger book resync on gaps (Bug 4)
     if let (Some(sid), Some(seq)) = (ws_msg.sid, ws_msg.seq) {
         let expected = seq_tracker.entry(sid).or_insert(0);
         if *expected > 0 && seq != *expected + 1 && ws_msg.msg_type != "orderbook_snapshot" {
@@ -189,8 +197,24 @@ async fn handle_ws_message(
                 sid = sid,
                 expected = *expected + 1,
                 got = seq,
-                "Sequence gap detected"
+                "Sequence gap detected — requesting book resync"
             );
+            // For orderbook messages, request a REST snapshot resync so the book
+            // is repaired before further deltas are applied.
+            if matches!(ws_msg.msg_type.as_str(), "orderbook_delta") {
+                if let Some(ticker) = ws_msg
+                    .msg
+                    .as_ref()
+                    .and_then(|m| m.get("market_ticker"))
+                    .and_then(|v| v.as_str())
+                {
+                    let _ = event_tx
+                        .send(ExchangeEvent::BookResyncNeeded {
+                            market_ticker: MarketTicker::from(ticker),
+                        })
+                        .await;
+                }
+            }
         }
         *expected = seq;
     }
@@ -222,8 +246,9 @@ async fn handle_ws_message(
                     .get("market_ticker")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                // Bug 5: case-insensitive side matching
                 let side = match msg.get("side").and_then(|v| v.as_str()) {
-                    Some("yes") => Side::Yes,
+                    Some(s) if s.eq_ignore_ascii_case("yes") => Side::Yes,
                     _ => Side::No,
                 };
                 let price = msg
@@ -254,19 +279,31 @@ async fn handle_ws_message(
                     .get("market_ticker")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                // Bug 6: handle integer yes_price field (value is in cents, not dollars)
                 let price = msg
                     .get("yes_price_dollars")
-                    .or_else(|| msg.get("yes_price"))
-                    .and_then(|v| v.as_str().or_else(|| v.as_i64().map(|_| "")))
+                    .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<Decimal>().ok())
+                    .or_else(|| {
+                        msg.get("yes_price")
+                            .and_then(|v| {
+                                if let Some(s) = v.as_str() {
+                                    s.parse::<Decimal>().ok()
+                                } else {
+                                    // Integer field is in cents
+                                    v.as_i64().map(|n| Decimal::new(n, 2))
+                                }
+                            })
+                    })
                     .unwrap_or_default();
                 let count = msg
                     .get("count_fp")
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<Decimal>().ok())
                     .unwrap_or(Decimal::ONE);
+                // Bug 5: case-insensitive taker_side matching
                 let taker_side = match msg.get("taker_side").and_then(|v| v.as_str()) {
-                    Some("yes") => Side::Yes,
+                    Some(s) if s.eq_ignore_ascii_case("yes") => Side::Yes,
                     _ => Side::No,
                 };
 
@@ -297,18 +334,27 @@ async fn handle_ws_message(
                     .get("market_ticker")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                // Bug 5: case-insensitive side/action matching
                 let side = match msg.get("side").and_then(|v| v.as_str()) {
-                    Some("yes") => Side::Yes,
+                    Some(s) if s.eq_ignore_ascii_case("yes") => Side::Yes,
                     _ => Side::No,
                 };
                 let action = match msg.get("action").and_then(|v| v.as_str()) {
-                    Some("buy") => Action::Buy,
+                    Some(s) if s.eq_ignore_ascii_case("buy") => Action::Buy,
                     _ => Action::Sell,
                 };
+                // Parse price: try yes_price_dollars, then no_price_dollars, then integer cents
                 let price = msg
                     .get("yes_price_dollars")
+                    .or_else(|| msg.get("no_price_dollars"))
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<Decimal>().ok())
+                    .or_else(|| {
+                        msg.get("yes_price")
+                            .or_else(|| msg.get("no_price"))
+                            .and_then(|v| v.as_i64())
+                            .map(|n| Decimal::new(n, 2))
+                    })
                     .unwrap_or_default();
                 let count = msg
                     .get("count_fp")
@@ -362,18 +408,27 @@ async fn handle_ws_message(
                     "executed" => OrderStatus::Executed,
                     _ => OrderStatus::Canceled,
                 };
+                // Bug 5: case-insensitive side/action matching
                 let side = match msg.get("side").and_then(|v| v.as_str()) {
-                    Some("yes") => Side::Yes,
+                    Some(s) if s.eq_ignore_ascii_case("yes") => Side::Yes,
                     _ => Side::No,
                 };
                 let action = match msg.get("action").and_then(|v| v.as_str()) {
-                    Some("buy") => Action::Buy,
+                    Some(s) if s.eq_ignore_ascii_case("buy") => Action::Buy,
                     _ => Action::Sell,
                 };
+                // Bug 7: try yes_price_dollars, then no_price_dollars, then integer cents
                 let price = msg
                     .get("yes_price_dollars")
+                    .or_else(|| msg.get("no_price_dollars"))
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<Decimal>().ok())
+                    .or_else(|| {
+                        msg.get("yes_price")
+                            .or_else(|| msg.get("no_price"))
+                            .and_then(|v| v.as_i64())
+                            .map(|n| Decimal::new(n, 2))
+                    })
                     .unwrap_or_default();
                 let remaining = msg
                     .get("remaining_count_fp")

@@ -3,6 +3,14 @@ name = "kalshi-bot"
 version = "0.2.0"
 edition = "2021"
 
+[[bin]]
+name = "kalshi-bot"
+path = "src/main.rs"
+
+[lib]
+name = "kalshi_bot"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }

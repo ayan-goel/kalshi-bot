@@ -248,11 +248,12 @@ impl StateEngine {
     }
 
     pub fn set_market_meta(&mut self, ticker: MarketTicker, meta: MarketMeta) {
+        // Bug 11: dedup before pushing so repeated calls don't bloat the group
         if let Some(ref et) = meta.event_ticker {
-            self.event_groups
-                .entry(et.clone())
-                .or_default()
-                .push(ticker.clone());
+            let group = self.event_groups.entry(et.clone()).or_default();
+            if !group.contains(&ticker) {
+                group.push(ticker.clone());
+            }
         }
         self.market_meta.insert(ticker, meta);
     }
@@ -279,6 +280,17 @@ impl StateEngine {
 
     /// Remove a market from the active set (for rescan swaps).
     pub fn remove_market(&mut self, ticker: &MarketTicker) {
+        // Bug 13: also remove from event_groups to prevent stale sibling lists
+        if let Some(meta) = self.market_meta.get(ticker) {
+            if let Some(et) = meta.event_ticker.clone() {
+                if let Some(group) = self.event_groups.get_mut(&et) {
+                    group.retain(|t| t != ticker);
+                    if group.is_empty() {
+                        self.event_groups.remove(&et);
+                    }
+                }
+            }
+        }
         self.books.remove(ticker);
         self.market_meta.remove(ticker);
     }
@@ -449,6 +461,14 @@ impl StateEngine {
                     (Side::No, Action::Sell) => pos.no_contracts -= count,
                 }
 
+                // Bug 8: accumulate daily P&L from fills as cash flow minus fees.
+                // Buys spend cash (negative), sells receive cash (positive).
+                let pnl_contribution = match action {
+                    Action::Buy => -(price * count) - fee,
+                    Action::Sell => (price * count) - fee,
+                };
+                self.daily_pnl += pnl_contribution;
+
                 let _ = crate::db::insert_fill(
                     &self.db_pool,
                     &trade_id,
@@ -532,6 +552,11 @@ impl StateEngine {
             ExchangeEvent::Disconnected => {
                 warn!("Exchange disconnected");
                 self.connectivity = ConnectivityState::Disconnected;
+            }
+            ExchangeEvent::BookResyncNeeded { market_ticker } => {
+                // Handled by the trading loop (REST snapshot fetch + re-apply).
+                // Log here so we have a record of when resyncs were triggered.
+                warn!(market = %market_ticker, "Book resync requested due to sequence gap");
             }
         }
     }

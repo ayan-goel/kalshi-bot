@@ -1,186 +1,199 @@
+use kalshi_bot::config::StrategyConfig;
+use kalshi_bot::orderbook::OrderBook;
+use kalshi_bot::state::MarketMeta;
+use kalshi_bot::strategy::MarketMakerStrategy;
+use kalshi_bot::types::{Balance, FairValue, MarketTicker, Position, PriceLevel};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-#[cfg(test)]
-mod strategy {
-    use super::*;
-
-    struct StrategyParams {
-        base_half_spread: Decimal,
-        min_edge_after_fees: Decimal,
-        default_order_size: Decimal,
-        max_order_size: Decimal,
-        inventory_skew_coeff: Decimal,
-        volatility_widen_coeff: Decimal,
+fn make_config() -> StrategyConfig {
+    StrategyConfig {
+        base_half_spread: dec!(0.02),
+        min_edge_after_fees: dec!(0.005),
+        default_order_size: 5,
+        max_order_size: 25,
+        min_rest_ms: 3000,
+        repricing_threshold: dec!(0.01),
+        inventory_skew_coeff: dec!(0.25),
+        volatility_widen_coeff: dec!(0.40),
+        tick_interval_ms: 2000,
+        order_imbalance_alpha: dec!(0.05),
+        trade_sign_alpha: dec!(0.02),
+        inventory_penalty_k1: dec!(0.03),
+        inventory_penalty_k3: dec!(0.001),
+        inv_spread_scale: dec!(0.10),
+        inv_skew_scale: dec!(0.01),
+        vol_baseline_spread: dec!(0.02),
+        expiry_widen_coeff: dec!(0.01),
+        expiry_widen_threshold_hours: 4.0,
+        event_half_spread_multiplier: dec!(3),
+        event_threshold: dec!(0.05),
+        event_decay_seconds: 30,
     }
+}
 
-    #[derive(Debug)]
-    struct Quote {
-        bid: Decimal,
-        ask: Decimal,
-        qty: Decimal,
-    }
+fn make_ticker() -> MarketTicker {
+    MarketTicker::from("TEST-MARKET")
+}
 
-    fn default_params() -> StrategyParams {
-        StrategyParams {
-            base_half_spread: dec!(0.02),
-            min_edge_after_fees: dec!(0.015),
-            default_order_size: dec!(5),
-            max_order_size: dec!(25),
-            inventory_skew_coeff: dec!(0.25),
-            volatility_widen_coeff: dec!(0.40),
-        }
-    }
+fn make_book(bid: Decimal, no_bid: Decimal, qty: Decimal) -> OrderBook {
+    let mut book = OrderBook::new();
+    book.apply_snapshot(
+        vec![PriceLevel { price: bid, quantity: qty }],
+        vec![PriceLevel { price: no_bid, quantity: qty }],
+        1,
+    );
+    book
+}
 
-    fn generate_quote(
-        params: &StrategyParams,
-        fair: Decimal,
-        spread: Decimal,
-        inventory: Decimal,
-        confidence: f64,
-    ) -> Option<Quote> {
-        // Participation filter
-        if spread < params.min_edge_after_fees * dec!(2) {
-            return None;
-        }
-        if confidence < 0.2 {
-            return None;
-        }
+fn make_fv(price: Decimal, confidence: f64) -> FairValue {
+    FairValue { market_ticker: make_ticker(), price, confidence }
+}
 
-        let inv_spread_adj = params.inventory_skew_coeff * inventory.abs() * dec!(0.1);
-        let vol_adj =
-            params.volatility_widen_coeff * (spread - dec!(0.02)).max(Decimal::ZERO);
+fn make_balance(available: Decimal) -> Balance {
+    Balance { available, portfolio_value: Decimal::ZERO }
+}
 
-        let total_half_spread = params.base_half_spread + inv_spread_adj + vol_adj;
+fn make_meta() -> MarketMeta {
+    MarketMeta::default()
+}
 
-        let skew = -params.inventory_skew_coeff * inventory * dec!(0.01);
-        let mut bid = fair - total_half_spread + skew;
-        let mut ask = fair + total_half_spread + skew;
+fn strategy() -> MarketMakerStrategy {
+    MarketMakerStrategy::new(&make_config())
+}
 
-        // Round
-        bid = (bid * dec!(100)).floor() / dec!(100);
-        ask = (ask * dec!(100)).ceil() / dec!(100);
+#[test]
+fn test_basic_quoting() {
+    // Spread = 0.10, fair = 0.50, balanced book → should get bid < 0.50 < ask
+    let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
+    let fv = make_fv(dec!(0.50), 0.8);
+    let quote = strategy()
+        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(dec!(1000)), 5)
+        .unwrap();
 
-        bid = bid.max(dec!(0.01));
-        ask = ask.min(dec!(0.99));
+    assert!(quote.yes_bid.as_ref().unwrap().price < dec!(0.50));
+    assert!(quote.yes_ask.as_ref().unwrap().price > dec!(0.50));
+    assert!(quote.yes_ask.as_ref().unwrap().price > quote.yes_bid.as_ref().unwrap().price);
+    assert!(quote.yes_bid.as_ref().unwrap().quantity > Decimal::ZERO);
+}
 
-        if ask <= bid {
-            ask = bid + dec!(0.01);
-            if ask > dec!(0.99) {
-                return None;
-            }
-        }
+#[test]
+fn test_spread_too_tight_returns_none() {
+    // If market spread (0.02) < fee_half_spread * 2, strategy should not quote
+    let book = make_book(dec!(0.49), dec!(0.51), dec!(100)); // spread = 0.02
+    let fv = make_fv(dec!(0.50), 0.8);
+    let quote = strategy()
+        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(dec!(1000)), 5);
+    assert!(quote.is_none(), "Spread too tight should return None");
+}
 
-        let conf_dec = Decimal::try_from(confidence).unwrap_or(dec!(0.5));
-        let qty = (params.default_order_size * conf_dec)
-            .max(Decimal::ONE)
-            .min(params.max_order_size)
-            .round_dp(0);
+#[test]
+fn test_low_confidence_returns_none() {
+    let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
+    let fv = make_fv(dec!(0.50), 0.05); // below 0.1 threshold
+    let quote = strategy()
+        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(dec!(1000)), 5);
+    assert!(quote.is_none(), "Low confidence should return None");
+}
 
-        Some(Quote { bid, ask, qty })
-    }
+#[test]
+fn test_inventory_skew_long_shifts_quotes_down() {
+    let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
+    let fv = make_fv(dec!(0.50), 0.8);
+    let bal = make_balance(dec!(1000));
+    let s = strategy();
+    let meta = make_meta();
 
-    #[test]
-    fn test_basic_quoting() {
-        let params = default_params();
-        let quote = generate_quote(&params, dec!(0.50), dec!(0.05), dec!(0), 0.8).unwrap();
+    let neutral = s.generate_quotes(&make_ticker(), &fv, &book, None, Some(&meta), &bal, 5).unwrap();
+    let long_pos = Position {
+        market_ticker: make_ticker(),
+        yes_contracts: dec!(5),
+        no_contracts: Decimal::ZERO,
+        avg_yes_price: None,
+        avg_no_price: None,
+        realized_pnl: Decimal::ZERO,
+        unrealized_pnl: Decimal::ZERO,
+    };
+    let long = s.generate_quotes(&make_ticker(), &fv, &book, Some(&long_pos), Some(&meta), &bal, 5).unwrap();
 
-        assert!(quote.bid < dec!(0.50));
-        assert!(quote.ask > dec!(0.50));
-        assert!(quote.ask > quote.bid);
-        assert!(quote.qty > Decimal::ZERO);
-    }
+    let neutral_mid = (neutral.yes_bid.unwrap().price + neutral.yes_ask.unwrap().price) / dec!(2);
+    let long_mid = (long.yes_bid.unwrap().price + long.yes_ask.unwrap().price) / dec!(2);
+    assert!(long_mid < neutral_mid, "Long inventory should shift quotes down: {long_mid} vs {neutral_mid}");
+}
 
-    #[test]
-    fn test_spread_too_tight_filtered() {
-        let params = default_params();
-        // min_edge * 2 = 0.03. Spread of 0.02 < 0.03 -> filtered
-        let quote = generate_quote(&params, dec!(0.50), dec!(0.02), dec!(0), 0.8);
-        assert!(quote.is_none());
-    }
+#[test]
+fn test_inventory_skew_short_shifts_quotes_up() {
+    let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
+    let fv = make_fv(dec!(0.50), 0.8);
+    let bal = make_balance(dec!(1000));
+    let s = strategy();
+    let meta = make_meta();
 
-    #[test]
-    fn test_low_confidence_filtered() {
-        let params = default_params();
-        let quote = generate_quote(&params, dec!(0.50), dec!(0.10), dec!(0), 0.1);
-        assert!(quote.is_none());
-    }
+    let neutral = s.generate_quotes(&make_ticker(), &fv, &book, None, Some(&meta), &bal, 5).unwrap();
+    let short_pos = Position {
+        market_ticker: make_ticker(),
+        yes_contracts: Decimal::ZERO,
+        no_contracts: dec!(5),
+        avg_yes_price: None,
+        avg_no_price: None,
+        realized_pnl: Decimal::ZERO,
+        unrealized_pnl: Decimal::ZERO,
+    };
+    let short = s.generate_quotes(&make_ticker(), &fv, &book, Some(&short_pos), Some(&meta), &bal, 5).unwrap();
 
-    #[test]
-    fn test_inventory_skew_long() {
-        let params = default_params();
-        let neutral = generate_quote(&params, dec!(0.50), dec!(0.10), dec!(0), 0.8).unwrap();
-        let long = generate_quote(&params, dec!(0.50), dec!(0.10), dec!(5), 0.8).unwrap();
+    let neutral_mid = (neutral.yes_bid.unwrap().price + neutral.yes_ask.unwrap().price) / dec!(2);
+    let short_mid = (short.yes_bid.unwrap().price + short.yes_ask.unwrap().price) / dec!(2);
+    assert!(short_mid > neutral_mid, "Short inventory should shift quotes up: {short_mid} vs {neutral_mid}");
+}
 
-        // Long inventory -> midpoint of quotes should shift down
-        let neutral_mid = (neutral.bid + neutral.ask) / dec!(2);
-        let long_mid = (long.bid + long.ask) / dec!(2);
-        assert!(
-            long_mid < neutral_mid,
-            "Long midpoint {long_mid} should be below neutral {neutral_mid}"
-        );
-    }
+#[test]
+fn test_zero_capital_returns_none() {
+    // With zero available balance, compute_size should return None → generate_quotes returns None
+    let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
+    let fv = make_fv(dec!(0.50), 0.8);
+    let quote = strategy()
+        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(Decimal::ZERO), 5);
+    assert!(quote.is_none(), "Zero capital should return None from generate_quotes");
+}
 
-    #[test]
-    fn test_inventory_skew_short() {
-        let params = default_params();
-        let neutral = generate_quote(&params, dec!(0.50), dec!(0.10), dec!(0), 0.8).unwrap();
-        let short = generate_quote(&params, dec!(0.50), dec!(0.10), dec!(-5), 0.8).unwrap();
+#[test]
+fn test_empty_book_returns_none() {
+    let book = OrderBook::new();
+    let fv = make_fv(dec!(0.50), 0.8);
+    let quote = strategy()
+        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(dec!(1000)), 5);
+    assert!(quote.is_none(), "Empty book should return None");
+}
 
-        // Short inventory -> midpoint of quotes should shift up
-        let neutral_mid = (neutral.bid + neutral.ask) / dec!(2);
-        let short_mid = (short.bid + short.ask) / dec!(2);
-        assert!(
-            short_mid > neutral_mid,
-            "Short midpoint {short_mid} should be above neutral {neutral_mid}"
-        );
-    }
+#[test]
+fn test_bid_ask_within_tick_bounds() {
+    let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
+    let fv = make_fv(dec!(0.50), 0.8);
+    let meta = make_meta(); // tick_min = 0.01, tick_max = 0.99
+    let quote = strategy()
+        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&meta), &make_balance(dec!(1000)), 5)
+        .unwrap();
+    let bid = quote.yes_bid.unwrap().price;
+    let ask = quote.yes_ask.unwrap().price;
+    assert!(bid >= dec!(0.01), "Bid {bid} below tick_min");
+    assert!(ask <= dec!(0.99), "Ask {ask} above tick_max");
+    assert!(ask > bid, "Ask must be above bid");
+}
 
-    #[test]
-    fn test_bid_ask_clamping() {
-        let params = default_params();
-        // Fair near 0 -> bid should be clamped to 0.01
-        let quote = generate_quote(&params, dec!(0.02), dec!(0.10), dec!(0), 0.8).unwrap();
-        assert!(quote.bid >= dec!(0.01));
-        assert!(quote.ask <= dec!(0.99));
-        assert!(quote.ask > quote.bid);
-    }
+#[test]
+fn test_wider_book_spread_widens_quotes() {
+    // Wider observable spread → vol_adj → wider quotes
+    let narrow_book = make_book(dec!(0.47), dec!(0.47), dec!(100)); // spread 0.06
+    let wide_book = make_book(dec!(0.40), dec!(0.40), dec!(100));   // spread 0.20
+    let fv = make_fv(dec!(0.50), 0.8);
+    let bal = make_balance(dec!(1000));
+    let s = strategy();
+    let meta = make_meta();
 
-    #[test]
-    fn test_bid_ask_at_high_fair() {
-        let params = default_params();
-        let quote = generate_quote(&params, dec!(0.98), dec!(0.10), dec!(0), 0.8).unwrap();
-        assert!(quote.bid >= dec!(0.01));
-        assert!(quote.ask <= dec!(0.99));
-        assert!(quote.ask > quote.bid);
-    }
+    let narrow = s.generate_quotes(&make_ticker(), &fv, &narrow_book, None, Some(&meta), &bal, 5).unwrap();
+    let wide = s.generate_quotes(&make_ticker(), &fv, &wide_book, None, Some(&meta), &bal, 5).unwrap();
 
-    #[test]
-    fn test_order_size_scales_with_confidence() {
-        let params = default_params();
-        let low_conf = generate_quote(&params, dec!(0.50), dec!(0.10), dec!(0), 0.3).unwrap();
-        let high_conf = generate_quote(&params, dec!(0.50), dec!(0.10), dec!(0), 0.9).unwrap();
-
-        assert!(high_conf.qty > low_conf.qty);
-    }
-
-    #[test]
-    fn test_order_size_bounded() {
-        let params = default_params();
-        let quote = generate_quote(&params, dec!(0.50), dec!(0.10), dec!(0), 1.0).unwrap();
-
-        assert!(quote.qty >= Decimal::ONE);
-        assert!(quote.qty <= params.max_order_size);
-    }
-
-    #[test]
-    fn test_wider_market_spread_widens_quotes() {
-        let params = default_params();
-        let narrow = generate_quote(&params, dec!(0.50), dec!(0.04), dec!(0), 0.8).unwrap();
-        let wide = generate_quote(&params, dec!(0.50), dec!(0.20), dec!(0), 0.8).unwrap();
-
-        let narrow_spread = narrow.ask - narrow.bid;
-        let wide_spread = wide.ask - wide.bid;
-        assert!(wide_spread > narrow_spread);
-    }
+    let narrow_half = (narrow.yes_ask.as_ref().unwrap().price - narrow.yes_bid.as_ref().unwrap().price) / dec!(2);
+    let wide_half = (wide.yes_ask.as_ref().unwrap().price - wide.yes_bid.as_ref().unwrap().price) / dec!(2);
+    assert!(wide_half > narrow_half, "Wider book should widen quotes: {wide_half} vs {narrow_half}");
 }

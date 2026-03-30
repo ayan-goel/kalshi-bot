@@ -155,6 +155,11 @@ pub enum ExchangeEvent {
     },
     Connected,
     Disconnected,
+    /// Emitted when a WS sequence gap is detected for a market's orderbook.
+    /// The trading loop handles this by fetching a REST snapshot and re-applying it.
+    BookResyncNeeded {
+        market_ticker: MarketTicker,
+    },
 }
 
 /// Desired action emitted by the strategy engine

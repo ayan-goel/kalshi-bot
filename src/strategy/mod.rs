@@ -68,8 +68,17 @@ impl MarketMakerStrategy {
 
         let spread = book.spread().unwrap_or(Decimal::ONE);
 
-        // Fee-aware minimum spread: maker_fee at fair price sets the floor
-        let fee_per_side = maker_fee(fv.price);
+        // Tick bounds from metadata (needed for fee estimation below)
+        let (tick_size, tick_min, tick_max) = match meta {
+            Some(m) => (m.tick_size, m.tick_min, m.tick_max),
+            None => (dec!(0.01), dec!(0.01), dec!(0.99)),
+        };
+
+        // Bug 12: compute fee floor using approximated bid/ask prices rather than
+        // fair value so the floor is accurate at extreme mids (near 0 or 1).
+        let bid_estimate = (fv.price - self.base_half_spread).max(tick_min);
+        let ask_estimate = (fv.price + self.base_half_spread).min(tick_max);
+        let fee_per_side = (maker_fee(bid_estimate) + maker_fee(ask_estimate)) / dec!(2);
         let fee_half_spread = fee_per_side + self.min_edge_after_fees;
         let effective_base = self.base_half_spread.max(fee_half_spread);
 
@@ -115,12 +124,7 @@ impl MarketMakerStrategy {
         bid_price += skew;
         ask_price += skew;
 
-        // Tick-size snapping using market metadata
-        let (tick_size, tick_min, tick_max) = match meta {
-            Some(m) => (m.tick_size, m.tick_min, m.tick_max),
-            None => (dec!(0.01), dec!(0.01), dec!(0.99)),
-        };
-
+        // Tick-size snapping (tick_size/tick_min/tick_max already set above)
         bid_price = snap_down(bid_price, tick_size);
         ask_price = snap_up(ask_price, tick_size);
 
@@ -134,8 +138,8 @@ impl MarketMakerStrategy {
             }
         }
 
-        // Capital-aware sizing
-        let qty = self.compute_size(fv, balance, max_markets, bid_price);
+        // Capital-aware sizing — Bug 9: return None when capital allows zero contracts
+        let qty = self.compute_size(fv, balance, max_markets, bid_price)?;
 
         debug!(
             market = %ticker,
@@ -189,7 +193,7 @@ impl MarketMakerStrategy {
         balance: &Balance,
         max_markets: u32,
         bid_price: Decimal,
-    ) -> Decimal {
+    ) -> Option<Decimal> {
         let confidence_factor = Decimal::try_from(fv.confidence).unwrap_or(dec!(0.5));
         let base_qty = (self.default_order_size * confidence_factor)
             .max(Decimal::ONE)
@@ -204,8 +208,14 @@ impl MarketMakerStrategy {
             self.max_order_size
         };
 
-        let qty = base_qty.min(max_by_capital).max(Decimal::ONE);
-        qty.round_dp(0)
+        // Bug 9: if the capital cap allows zero contracts, don't force a 1-contract order
+        // that would exceed the per-market capital budget.
+        let qty = base_qty.min(max_by_capital).round_dp(0);
+        if qty.is_zero() {
+            None
+        } else {
+            Some(qty)
+        }
     }
 }
 

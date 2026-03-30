@@ -35,9 +35,14 @@ impl BotState {
                 | (BotState::Starting, BotState::Error)
                 | (BotState::Running, BotState::Stopping)
                 | (BotState::Running, BotState::Error)
+                // Bug 17: allow Running -> Stopped for the Stop/Kill command path,
+                // which calls transition(Stopped) after the trading task has already
+                // exited (possibly without passing through Stopping).
+                | (BotState::Running, BotState::Stopped)
                 | (BotState::Running, BotState::Switching)
                 | (BotState::Stopping, BotState::Stopped)
                 | (BotState::Error, BotState::Stopped)
+                | (BotState::Error, BotState::Starting)
                 | (BotState::Switching, BotState::Stopped)
                 | (BotState::Switching, BotState::Error)
         )

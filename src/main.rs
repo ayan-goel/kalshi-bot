@@ -18,7 +18,6 @@ mod types;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
 use std::path::Path;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing_subscriber::Layer;
@@ -34,14 +33,21 @@ async fn main() -> Result<()> {
     let config = config::AppConfig::load(Path::new("config/default.yaml"))?;
     let log_buffer = log_buffer::LogBuffer::from_env(10_000);
 
+    // Bug 21: use logging.level from YAML as default, overridden by RUST_LOG env var
+    let log_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            EnvFilter::try_new(&config.logging.level)
+                .unwrap_or_else(|_| EnvFilter::new("info"))
+        });
+
     if config.logging.json {
         tracing_subscriber::registry()
-            .with(fmt::layer().json().with_filter(EnvFilter::from_default_env()))
+            .with(fmt::layer().json().with_filter(log_filter))
             .with(log_buffer::LogBufferLayer::new(log_buffer.clone()))
             .init();
     } else {
         tracing_subscriber::registry()
-            .with(fmt::layer().with_filter(EnvFilter::from_default_env()))
+            .with(fmt::layer().with_filter(log_filter))
             .with(log_buffer::LogBufferLayer::new(log_buffer.clone()))
             .init();
     }
@@ -104,13 +110,13 @@ async fn main() -> Result<()> {
             interval.tick().await;
             let engine = pnl_state.read().await;
             let available = engine.balance().available;
-            // Compute portfolio value from live positions × current mid-prices
-            // (Kalshi's /portfolio/balance does not return portfolio_value)
+            // Mark-to-market value of all open positions at current mid-prices.
             let portfolio_value = engine.compute_portfolio_value();
-            // Realized PnL from fills tracked in positions
-            let realized = engine.compute_realized_pnl();
-            // Unrealized PnL = portfolio_value − cost_basis (approximated as portfolio_value
-            // since cost_basis tracking is complex; charts show total equity movement)
+            // Realized P&L = cumulative cash flow from fills (buys cost, sells earn).
+            // Accumulated in daily_pnl by StateEngine::process_event on each fill.
+            let realized = engine.daily_pnl();
+            // Bug 18: unrealized = mark-to-market value of open positions.
+            // Together, realized + unrealized gives total equity change since session start.
             let unrealized = portfolio_value;
             let open_orders = engine.open_order_count() as i32;
             let active_markets = engine.active_market_count() as i32;
@@ -436,13 +442,45 @@ async fn run_trading_loop(
             }
             event = event_rx.recv() => {
                 match event {
+                    // Bug 4: handle book resync request by fetching REST snapshot
+                    Some(types::ExchangeEvent::BookResyncNeeded { market_ticker }) => {
+                        tracing::info!(market = %market_ticker, "Performing REST book resync after sequence gap");
+                        match rest_client.get_orderbook(&market_ticker.0).await {
+                            Ok(ob_data) => {
+                                let yes_bids = orderbook_data_to_price_levels(&ob_data.yes_dollars);
+                                let no_bids = orderbook_data_to_price_levels(&ob_data.no_dollars);
+                                let mut engine = state_engine.write().await;
+                                engine.process_event(types::ExchangeEvent::BookSnapshot {
+                                    market_ticker,
+                                    yes_bids,
+                                    no_bids,
+                                    seq: 0,
+                                }).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, market = %market_ticker, "REST book resync failed");
+                            }
+                        }
+                    }
                     Some(ev) => {
                         broadcast_exchange_event(&ev, &event_broadcast);
                         let mut engine = state_engine.write().await;
                         engine.process_event(ev).await;
                     }
                     None => {
-                        tracing::error!("Event channel closed in trading loop");
+                        tracing::error!("Event channel closed in trading loop — WS task exited");
+                        // Bug 17: transition to Error so the API shows the correct state
+                        let mut bsm = bot_state.write().await;
+                        let _ = bsm
+                            .transition(
+                                BotState::Error,
+                                "event_channel_closed",
+                                Some(serde_json::json!({
+                                    "message": "WebSocket event channel closed unexpectedly"
+                                })),
+                            )
+                            .await;
+                        drop(bsm);
                         break;
                     }
                 }
@@ -610,7 +648,7 @@ async fn run_trading_loop(
 
                 let engine = state_engine.read().await;
                 let failed_markets = execution_engine
-                    .reconcile(&engine, &target_quotes)
+                    .reconcile(&engine, &target_quotes, &risk_engine)
                     .await;
                 drop(engine);
 
@@ -714,6 +752,24 @@ async fn reconcile_startup(
     Ok(())
 }
 
+/// Convert a REST orderbook price-level list (Vec<[price, qty]>) to PriceLevel vec.
+fn orderbook_data_to_price_levels(
+    levels: &Option<Vec<Vec<String>>>,
+) -> Vec<types::PriceLevel> {
+    use rust_decimal::Decimal;
+    let Some(v) = levels else { return vec![] };
+    v.iter()
+        .filter_map(|pair| {
+            if pair.len() < 2 {
+                return None;
+            }
+            let price = pair[0].parse::<Decimal>().ok()?;
+            let quantity = pair[1].parse::<Decimal>().ok()?;
+            Some(types::PriceLevel { price, quantity })
+        })
+        .collect()
+}
+
 fn broadcast_exchange_event(ev: &types::ExchangeEvent, tx: &api::EventBroadcast) {
     match ev {
         types::ExchangeEvent::Fill {
@@ -781,9 +837,12 @@ fn compute_target_quotes(
     let balance = state.balance().clone();
     let all_tickers: Vec<types::MarketTicker> = state.books().keys().cloned().collect();
 
-    let mut quotes = Vec::new();
+    // Phase 1: generate quotes for each market; defer risk check until after cross-market
+    // Bug 16: cross-market adjustment happens after the first risk pass, so we re-check
+    // risk on the final adjusted quotes.
+    let mut pre_adjust: Vec<(types::TargetQuote, rust_decimal::Decimal)> = Vec::new();
+
     for ticker in &all_tickers {
-        // Skip markets that have been blacklisted (e.g. persistent invalid_order)
         if skip_markets.contains(ticker) {
             continue;
         }
@@ -796,8 +855,6 @@ fn compute_target_quotes(
         let position = state.get_position(ticker);
         let meta = state.get_market_meta(ticker);
 
-        // Require metadata: without it we have no expiry guard or tick info.
-        // This catches markets whose API data wasn't loaded at startup.
         let meta = match meta {
             Some(m) => m,
             None => {
@@ -806,8 +863,6 @@ fn compute_target_quotes(
             }
         };
 
-        // Guard: don't quote markets whose close_time has already passed
-        // or that are within 30 minutes of expiry.
         let hours = meta.hours_to_expiry();
         if hours < 0.5 {
             tracing::debug!(
@@ -836,7 +891,6 @@ fn compute_target_quotes(
         );
 
         if let Some(mut target) = target {
-            // Apply event detector spread multiplier
             let mult = event_detector.spread_multiplier(ticker);
             if mult > rust_decimal::Decimal::ONE {
                 if let (Some(ref mut bid), Some(ref mut ask)) = (&mut target.yes_bid, &mut target.yes_ask) {
@@ -848,31 +902,42 @@ fn compute_target_quotes(
                 }
             }
 
-            // Risk check on the target quote
-            match risk.check_target_quote(&target, state, Some(fv.price)) {
-                types::RiskDecision::Approved => {
-                    quotes.push(target);
-                }
-                types::RiskDecision::Rejected { reason } => {
-                    tracing::debug!(
-                        market = %ticker,
-                        reason = %reason,
-                        "Target quote rejected by risk"
-                    );
-                }
-                types::RiskDecision::KillSwitch { reason } => {
-                    tracing::error!(
-                        market = %ticker,
-                        reason = %reason,
-                        "Kill switch from target quote risk check"
-                    );
-                }
-            }
+            pre_adjust.push((target, fv.price));
         }
     }
 
-    // Apply cross-market consistency adjustments
-    let quotes = cross_market.adjust_quotes(quotes, state);
+    // Phase 2: apply cross-market consistency adjustments
+    let raw_quotes: Vec<types::TargetQuote> = pre_adjust.iter().map(|(q, _)| q.clone()).collect();
+    let adjusted_quotes = cross_market.adjust_quotes(raw_quotes, state);
+
+    // Build a fair-price lookup for the post-adjustment risk check
+    let fv_by_ticker: std::collections::HashMap<&types::MarketTicker, rust_decimal::Decimal> =
+        pre_adjust.iter().map(|(q, fv)| (&q.market_ticker, *fv)).collect();
+
+    // Phase 3: run risk check on the final (cross-market-adjusted) quotes
+    let mut quotes = Vec::new();
+    for target in adjusted_quotes {
+        let fair = fv_by_ticker.get(&target.market_ticker).copied();
+        match risk.check_target_quote(&target, state, fair) {
+            types::RiskDecision::Approved => {
+                quotes.push(target);
+            }
+            types::RiskDecision::Rejected { reason } => {
+                tracing::debug!(
+                    market = %target.market_ticker,
+                    reason = %reason,
+                    "Target quote rejected by risk (post cross-market)"
+                );
+            }
+            types::RiskDecision::KillSwitch { reason } => {
+                tracing::error!(
+                    market = %target.market_ticker,
+                    reason = %reason,
+                    "Kill switch from target quote risk check"
+                );
+            }
+        }
+    }
 
     quotes
 }

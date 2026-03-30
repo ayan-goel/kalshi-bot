@@ -147,7 +147,13 @@ pub struct RiskConfig {
     pub max_total_reserved: Decimal,
     pub max_open_orders: u32,
     pub cancel_all_on_disconnect: bool,
+    /// How long to wait after a disconnect before triggering the kill switch.
+    /// Currently informational — the WS reconnect loop retries immediately with
+    /// exponential backoff; a future enhancement could honour this timeout.
     pub disconnect_timeout_secs: u64,
+    /// Maximum seconds to tolerate a sequence gap before forcing a book resync.
+    /// Currently the resync is triggered immediately on any gap; this field
+    /// is reserved for a future debounce window.
     pub seq_gap_timeout_secs: u64,
     #[serde(default = "default_max_capital_per_market")]
     pub max_capital_per_market: Decimal,
