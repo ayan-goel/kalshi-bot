@@ -7,7 +7,7 @@ import { FillsTable } from "@/components/fills-table";
 import { useStatus, useBalance, usePnl, useFills } from "@/lib/hooks";
 import {
   DollarSign,
-  Briefcase,
+  Layers,
   TrendingUp,
   ShoppingCart,
   BarChart3,
@@ -25,21 +25,16 @@ export default function DashboardPage() {
 
   const available = balance ? parseFloat(balance.available) : 0;
   const portfolioValue = balance ? parseFloat(balance.portfolio_value) : 0;
-  const totalEquity = available + portfolioValue;
 
-  // Latest snapshot gives most up-to-date picture of equity
+  // Latest snapshot for realtime PnL data
   const latestSnap = pnl?.snapshots?.[0];
-  const snapEquity = latestSnap
-    ? parseFloat(latestSnap.balance) + parseFloat(latestSnap.portfolio_value)
-    : null;
 
-  // PnL = current equity − first ever snapshot equity (approximate session PnL)
-  const firstSnap = pnl?.snapshots?.length
-    ? pnl.snapshots[pnl.snapshots.length - 1]
-    : null;
-  const sessionPnl = firstSnap
-    ? totalEquity - (parseFloat(firstSnap.balance) + parseFloat(firstSnap.portfolio_value))
-    : 0;
+  // Session PnL = today's fill cash flow (realized) + current position mark (unrealized).
+  // daily_realized_pnl tracks cumulative cash in/out from fills since midnight.
+  // unrealized_pnl is the mark-to-market of open positions at the latest snapshot.
+  const realizedPnl = pnl ? parseFloat(pnl.daily_realized_pnl) : 0;
+  const unrealizedPnl = latestSnap ? parseFloat(latestSnap.unrealized_pnl) : 0;
+  const sessionPnl = realizedPnl + unrealizedPnl;
 
   const fmt = (v: number) => `$${v.toFixed(2)}`;
   const sign = (v: number) => (v >= 0 ? "+" : "");
@@ -60,26 +55,32 @@ export default function DashboardPage() {
 
       <EnvSwitcher />
 
+      {/* Row 1: Cash | Position Value | Session PnL | Open Orders */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard
-          label="Cash Balance"
+          label="Cash"
           value={balance ? fmt(available) : "—"}
-          subValue={balance ? `Positions: ${fmt(portfolioValue)}` : undefined}
+          subValue="Available balance"
           icon={DollarSign}
           iconColor="text-emerald-400"
           iconBg="bg-emerald-400/10"
         />
         <StatCard
-          label="Total Equity"
-          value={balance ? fmt(totalEquity) : "—"}
-          subValue={snapEquity != null ? `Last snap: ${fmt(snapEquity)}` : undefined}
-          icon={Briefcase}
+          label="Position Value"
+          value={balance ? fmt(portfolioValue) : "—"}
+          subValue="Mark-to-market"
+          icon={Layers}
           iconColor="text-blue-400"
           iconBg="bg-blue-400/10"
         />
         <StatCard
           label="Session PnL"
-          value={balance ? `${sign(sessionPnl)}${fmt(sessionPnl)}` : "—"}
+          value={pnl ? `${sign(sessionPnl)}${fmt(sessionPnl)}` : "—"}
+          subValue={
+            pnl
+              ? `${sign(realizedPnl)}${fmt(realizedPnl)} realized · ${sign(unrealizedPnl)}${fmt(unrealizedPnl)} unrealized`
+              : undefined
+          }
           icon={TrendingUp}
           iconColor={sessionPnl >= 0 ? "text-emerald-400" : "text-red-400"}
           iconBg={sessionPnl >= 0 ? "bg-emerald-400/10" : "bg-red-400/10"}
@@ -94,6 +95,7 @@ export default function DashboardPage() {
         />
       </div>
 
+      {/* Row 2: Active Markets | Reserved | Connectivity | Trading */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard
           label="Active Markets"
@@ -104,7 +106,7 @@ export default function DashboardPage() {
         />
         <StatCard
           label="Reserved"
-          value={balance ? `$${balance.total_reserved}` : "—"}
+          value={balance ? `$${parseFloat(balance.total_reserved).toFixed(2)}` : "—"}
           icon={Lock}
           iconColor="text-zinc-400"
           iconBg="bg-zinc-400/10"
@@ -158,7 +160,7 @@ function StatCard({
 }) {
   return (
     <div className="rounded-xl border border-[#1e1e2e] bg-[#111118] p-4 flex items-start gap-3">
-      <div className={cn("rounded-lg p-2", iconBg)}>
+      <div className={cn("rounded-lg p-2 shrink-0", iconBg)}>
         <Icon className={cn("h-4 w-4", iconColor)} />
       </div>
       <div className="min-w-0">
