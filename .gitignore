@@ -1,0 +1,12 @@
+# Rust
+/target
+
+# Node / Dashboard
+dashboard/node_modules
+dashboard/.next
+dashboard/.env.local
+
+# Secrets
+.env
+*.key
+*.pem

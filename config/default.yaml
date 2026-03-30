@@ -1,0 +1,53 @@
+environment: demo
+api_port: 8080
+
+exchange:
+  rest_base_url: "https://demo-api.kalshi.co/trade-api/v2"
+  ws_url: "wss://demo-api.kalshi.co/trade-api/ws/v2"
+  api_key_env: "KALSHI_API_KEY"
+  private_key_path_env: "KALSHI_PRIVATE_KEY_PATH"
+  production:
+    rest_base_url: "https://api.elections.kalshi.com/trade-api/v2"
+    ws_url: "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    api_key_env: "KALSHI_PROD_API_KEY"
+    private_key_env: "KALSHI_PROD_PRIVATE_KEY_BASE64"
+
+trading:
+  enabled: false
+  markets_allowlist: []
+  categories_allowlist: []
+  max_open_orders: 500
+  max_markets_active: 30
+
+strategy:
+  base_half_spread: "0.02"
+  min_edge_after_fees: "0.015"
+  default_order_size: 5
+  max_order_size: 25
+  min_rest_ms: 1500
+  repricing_threshold: "0.01"
+  inventory_skew_coeff: "0.25"
+  volatility_widen_coeff: "0.40"
+  tick_interval_ms: 1000
+  order_imbalance_alpha: "0.05"
+  trade_sign_alpha: "0.02"
+  inventory_penalty_k1: "0.03"
+  inventory_penalty_k3: "0.001"
+
+risk:
+  max_loss_daily: "250.00"
+  max_market_notional: "1500.00"
+  max_market_inventory_contracts: 100
+  max_total_reserved: "4000.00"
+  max_open_orders: 500
+  cancel_all_on_disconnect: true
+  disconnect_timeout_secs: 30
+  seq_gap_timeout_secs: 10
+
+database:
+  url_env: "DATABASE_URL"
+  max_connections: 5
+
+logging:
+  level: "info"
+  json: true
