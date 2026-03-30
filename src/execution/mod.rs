@@ -205,14 +205,11 @@ impl ExecutionEngine {
                     self.last_action_time.insert(ticker, Instant::now());
                 }
                 Err(e) => {
+                    let req_json = serde_json::to_string(req).unwrap_or_default();
                     warn!(
                         ticker = %req.ticker,
                         error = %e,
-                        side = %req.side,
-                        action = %req.action,
-                        yes_price = ?req.yes_price_dollars,
-                        no_price = ?req.no_price_dollars,
-                        count = ?req.count,
+                        request_json = %req_json,
                         "Order creation failed"
                     );
                 }

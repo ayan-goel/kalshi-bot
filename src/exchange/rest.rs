@@ -83,6 +83,12 @@ impl KalshiRestClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
+            warn!(
+                path = %path,
+                status = %status,
+                response_body = %body_text,
+                "API error response"
+            );
             anyhow::bail!("POST {path} returned {status}: {body_text}");
         }
 
@@ -189,7 +195,8 @@ impl KalshiRestClient {
 
     #[instrument(skip(self))]
     pub async fn create_order(&self, req: &CreateOrderRequest) -> Result<OrderResponse> {
-        debug!(ticker = %req.ticker, side = %req.side, "Creating order");
+        let req_json = serde_json::to_string(req).unwrap_or_default();
+        debug!(ticker = %req.ticker, side = %req.side, request_body = %req_json, "Creating order");
         let resp = self.post("/portfolio/orders", req).await?;
         let data: CreateOrderResponse = resp.json().await?;
         Ok(data.order)
