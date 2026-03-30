@@ -23,13 +23,27 @@ export function PnlChart() {
     );
   }
 
-  const chartData = [...data.snapshots].reverse().map((s) => ({
-    time: new Date(s.ts).toLocaleTimeString(),
-    realized: parseFloat(s.realized_pnl),
-    unrealized: parseFloat(s.unrealized_pnl),
-    total: parseFloat(s.realized_pnl) + parseFloat(s.unrealized_pnl),
-    balance: parseFloat(s.balance),
-  }));
+  // Reverse so oldest is left, newest is right
+  const ordered = [...data.snapshots].reverse();
+
+  // Baseline = first snapshot's total equity
+  const baseline =
+    parseFloat(ordered[0]?.balance ?? "0") +
+    parseFloat(ordered[0]?.portfolio_value ?? "0");
+
+  const chartData = ordered.map((s) => {
+    const equity = parseFloat(s.balance) + parseFloat(s.portfolio_value);
+    return {
+      time: new Date(s.ts).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+      equity: parseFloat(equity.toFixed(4)),
+      pnl: parseFloat((equity - baseline).toFixed(4)),
+      cash: parseFloat(parseFloat(s.balance).toFixed(4)),
+      positions: parseFloat(parseFloat(s.portfolio_value).toFixed(4)),
+    };
+  });
 
   return (
     <ResponsiveContainer width="100%" height={280}>
@@ -46,6 +60,7 @@ export function PnlChart() {
           tick={{ fontSize: 11, fill: "#52525b" }}
           axisLine={{ stroke: "#1e1e2e" }}
           tickLine={{ stroke: "#1e1e2e" }}
+          tickFormatter={(v) => `$${v.toFixed(2)}`}
         />
         <Tooltip
           contentStyle={{
@@ -55,34 +70,37 @@ export function PnlChart() {
             color: "#e4e4e7",
             fontSize: "12px",
           }}
+          formatter={(value, name) => [
+            typeof value === "number" ? `$${value.toFixed(4)}` : String(value),
+            name,
+          ]}
         />
-        <Legend
-          wrapperStyle={{ fontSize: "12px", color: "#71717a" }}
-        />
+        <Legend wrapperStyle={{ fontSize: "12px", color: "#71717a" }} />
         <Line
           type="monotone"
-          dataKey="realized"
-          stroke="#22c55e"
-          name="Realized"
-          dot={false}
-          strokeWidth={2}
-        />
-        <Line
-          type="monotone"
-          dataKey="unrealized"
-          stroke="#6366f1"
-          name="Unrealized"
-          dot={false}
-          strokeWidth={2}
-        />
-        <Line
-          type="monotone"
-          dataKey="total"
+          dataKey="equity"
           stroke="#f59e0b"
-          name="Total"
+          name="Total Equity"
+          dot={false}
+          strokeWidth={2}
+        />
+        <Line
+          type="monotone"
+          dataKey="pnl"
+          stroke="#22c55e"
+          name="Session PnL"
           dot={false}
           strokeWidth={1.5}
           strokeDasharray="4 4"
+        />
+        <Line
+          type="monotone"
+          dataKey="cash"
+          stroke="#6366f1"
+          name="Cash"
+          dot={false}
+          strokeWidth={1}
+          opacity={0.6}
         />
       </LineChart>
     </ResponsiveContainer>

@@ -23,7 +23,26 @@ export default function DashboardPage() {
   const { data: pnl } = usePnl();
   const { data: fills } = useFills(10);
 
-  const dailyPnl = pnl ? parseFloat(pnl.daily_realized_pnl) : 0;
+  const available = balance ? parseFloat(balance.available) : 0;
+  const portfolioValue = balance ? parseFloat(balance.portfolio_value) : 0;
+  const totalEquity = available + portfolioValue;
+
+  // Latest snapshot gives most up-to-date picture of equity
+  const latestSnap = pnl?.snapshots?.[0];
+  const snapEquity = latestSnap
+    ? parseFloat(latestSnap.balance) + parseFloat(latestSnap.portfolio_value)
+    : null;
+
+  // PnL = current equity − first ever snapshot equity (approximate session PnL)
+  const firstSnap = pnl?.snapshots?.length
+    ? pnl.snapshots[pnl.snapshots.length - 1]
+    : null;
+  const sessionPnl = firstSnap
+    ? totalEquity - (parseFloat(firstSnap.balance) + parseFloat(firstSnap.portfolio_value))
+    : 0;
+
+  const fmt = (v: number) => `$${v.toFixed(2)}`;
+  const sign = (v: number) => (v >= 0 ? "+" : "");
 
   return (
     <div className="space-y-6 max-w-[1400px]">
@@ -43,26 +62,28 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard
-          label="Balance"
-          value={balance ? `$${balance.available}` : "—"}
+          label="Cash Balance"
+          value={balance ? fmt(available) : "—"}
+          subValue={balance ? `Positions: ${fmt(portfolioValue)}` : undefined}
           icon={DollarSign}
           iconColor="text-emerald-400"
           iconBg="bg-emerald-400/10"
         />
         <StatCard
-          label="Portfolio Value"
-          value={balance ? `$${balance.portfolio_value}` : "—"}
+          label="Total Equity"
+          value={balance ? fmt(totalEquity) : "—"}
+          subValue={snapEquity != null ? `Last snap: ${fmt(snapEquity)}` : undefined}
           icon={Briefcase}
           iconColor="text-blue-400"
           iconBg="bg-blue-400/10"
         />
         <StatCard
-          label="Daily PnL"
-          value={pnl ? `${dailyPnl >= 0 ? "+" : ""}$${pnl.daily_realized_pnl}` : "—"}
+          label="Session PnL"
+          value={balance ? `${sign(sessionPnl)}${fmt(sessionPnl)}` : "—"}
           icon={TrendingUp}
-          iconColor={dailyPnl >= 0 ? "text-emerald-400" : "text-red-400"}
-          iconBg={dailyPnl >= 0 ? "bg-emerald-400/10" : "bg-red-400/10"}
-          valueColor={dailyPnl >= 0 ? "text-emerald-400" : "text-red-400"}
+          iconColor={sessionPnl >= 0 ? "text-emerald-400" : "text-red-400"}
+          iconBg={sessionPnl >= 0 ? "bg-emerald-400/10" : "bg-red-400/10"}
+          valueColor={sessionPnl >= 0 ? "text-emerald-400" : "text-red-400"}
         />
         <StatCard
           label="Open Orders"
@@ -121,6 +142,7 @@ export default function DashboardPage() {
 function StatCard({
   label,
   value,
+  subValue,
   icon: Icon,
   iconColor,
   iconBg,
@@ -128,6 +150,7 @@ function StatCard({
 }: {
   label: string;
   value: string;
+  subValue?: string;
   icon: React.ComponentType<{ className?: string }>;
   iconColor: string;
   iconBg: string;
@@ -150,6 +173,11 @@ function StatCard({
         >
           {value}
         </p>
+        {subValue && (
+          <p className="text-[10px] text-zinc-600 font-mono mt-0.5 truncate">
+            {subValue}
+          </p>
+        )}
       </div>
     </div>
   );

@@ -207,8 +207,36 @@ impl StateEngine {
         &self.books
     }
 
+    /// Number of scanner-selected markets (those with loaded metadata).
+    /// Does NOT count books created incidentally from WS events for other tickers.
     pub fn active_market_count(&self) -> usize {
-        self.books.len()
+        self.market_meta.len()
+    }
+
+    /// Compute portfolio value as the sum of all position values at current mid-prices.
+    ///
+    /// YES contracts are worth `yes_contracts × mid`.
+    /// NO contracts are worth `no_contracts × (1 − mid)`.
+    /// Falls back to $0 for positions without a live book.
+    pub fn compute_portfolio_value(&self) -> rust_decimal::Decimal {
+        use rust_decimal::Decimal;
+        self.positions
+            .iter()
+            .map(|(ticker, pos)| {
+                // Use a sensible fallback: if no book, assume 50¢ mid
+                let mid = self
+                    .books
+                    .get(ticker)
+                    .and_then(|b| b.mid())
+                    .unwrap_or_else(|| rust_decimal_macros::dec!(0.50));
+                pos.yes_contracts * mid + pos.no_contracts * (Decimal::ONE - mid)
+            })
+            .sum()
+    }
+
+    /// Compute realized PnL by summing all positions' realized_pnl.
+    pub fn compute_realized_pnl(&self) -> rust_decimal::Decimal {
+        self.positions.values().map(|p| p.realized_pnl).sum()
     }
 
     pub fn db_pool(&self) -> &PgPool {

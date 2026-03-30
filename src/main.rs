@@ -103,30 +103,35 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             let engine = pnl_state.read().await;
-            let bal = engine.balance();
-            let realized = engine.daily_pnl();
-            let unrealized = engine
-                .positions()
-                .values()
-                .map(|p| p.unrealized_pnl)
-                .sum::<Decimal>();
+            let available = engine.balance().available;
+            // Compute portfolio value from live positions × current mid-prices
+            // (Kalshi's /portfolio/balance does not return portfolio_value)
+            let portfolio_value = engine.compute_portfolio_value();
+            // Realized PnL from fills tracked in positions
+            let realized = engine.compute_realized_pnl();
+            // Unrealized PnL = portfolio_value − cost_basis (approximated as portfolio_value
+            // since cost_basis tracking is complex; charts show total equity movement)
+            let unrealized = portfolio_value;
+            let open_orders = engine.open_order_count() as i32;
+            let active_markets = engine.active_market_count() as i32;
+            drop(engine);
 
             let _ = db::insert_pnl_snapshot(
                 &pnl_pool,
                 realized,
                 unrealized,
-                bal.available,
-                bal.portfolio_value,
-                engine.open_order_count() as i32,
-                engine.active_market_count() as i32,
+                available,
+                portfolio_value,
+                open_orders,
+                active_markets,
             )
             .await;
 
             let _ = pnl_broadcast.send(WsEvent::PnlTick {
                 realized_pnl: realized.to_string(),
                 unrealized_pnl: unrealized.to_string(),
-                balance: bal.available.to_string(),
-                portfolio_value: bal.portfolio_value.to_string(),
+                balance: available.to_string(),
+                portfolio_value: portfolio_value.to_string(),
             });
         }
     });
@@ -443,8 +448,42 @@ async fn run_trading_loop(
                 }
             }
             _ = order_sync_tick.tick() => {
-                // Sync open order state with exchange to drop stale orders
-                // (settled markets cancel all orders server-side; WS sometimes misses it)
+                // ── Balance refresh ──────────────────────────────────────────
+                // Kalshi's balance updates in real-time as fills happen.
+                // We only fetched it at startup; refresh now so the dashboard
+                // reflects the actual cash on hand.
+                match rest_client.get_balance().await {
+                    Ok(bal) => {
+                        let mut engine = state_engine.write().await;
+                        tracing::debug!(
+                            available = %bal.available,
+                            "Balance refreshed"
+                        );
+                        engine.set_balance(bal);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Balance refresh failed");
+                    }
+                }
+
+                // ── Position sync ─────────────────────────────────────────────
+                // Re-fetch positions so unrealized_pnl and contract counts stay
+                // accurate without relying solely on WS fill events.
+                match rest_client.get_positions().await {
+                    Ok(positions) => {
+                        let mut engine = state_engine.write().await;
+                        for pos in positions {
+                            engine.upsert_position(pos);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Position sync failed");
+                    }
+                }
+
+                // ── Open order sync ───────────────────────────────────────────
+                // Prune stale orders that Kalshi cancelled (settled markets, etc.)
+                // when WS events were missed.
                 match rest_client.get_orders(Some("resting")).await {
                     Ok(live_orders) => {
                         let live_ids: std::collections::HashSet<String> =
