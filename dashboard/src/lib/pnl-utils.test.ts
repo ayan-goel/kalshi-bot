@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractPnlSummary,
   latestPnlValue,
   mapSnapshotsToChartPoints,
   pointPnlValue,
 } from "./pnl-utils";
-import type { PnlSnapshot } from "./types";
+import type { PnlData, PnlSnapshot } from "./types";
 
 const snapshotsDesc: PnlSnapshot[] = [
   {
@@ -41,7 +42,74 @@ const snapshotsDesc: PnlSnapshot[] = [
   },
 ];
 
+const nestedPnlData: PnlData = {
+  window: "all",
+  session_started_at: "2026-03-30T20:00:00Z",
+  session: {
+    pnl: "1.75",
+    realized_pnl: "1.25",
+    unrealized_pnl: "0.50",
+  },
+  daily: {
+    pnl: "2.10",
+    realized_pnl: "1.60",
+    unrealized_pnl: "0.50",
+  },
+  components: {
+    cash: "99.00",
+    position_value: "2.00",
+    equity: "101.00",
+  },
+  snapshots: snapshotsDesc,
+};
+
 describe("pnl-utils", () => {
+  it("extracts summary from nested session/daily fields", () => {
+    const summary = extractPnlSummary(nestedPnlData);
+    expect(summary).toEqual({
+      sessionPnl: 1.75,
+      sessionRealized: 1.25,
+      sessionUnrealized: 0.5,
+      dailyPnl: 2.1,
+      dailyRealized: 1.6,
+      dailyUnrealized: 0.5,
+    });
+  });
+
+  it("returns zeros for missing nested fields", () => {
+    const incompletePayload = {
+      window: "all",
+      session_started_at: null,
+      components: {
+        cash: "99.00",
+        position_value: "2.00",
+        equity: "101.00",
+      },
+      snapshots: [],
+    } as unknown as PnlData;
+
+    const summary = extractPnlSummary(incompletePayload);
+    expect(summary).toEqual({
+      sessionPnl: 0,
+      sessionRealized: 0,
+      sessionUnrealized: 0,
+      dailyPnl: 0,
+      dailyRealized: 0,
+      dailyUnrealized: 0,
+    });
+  });
+
+  it("returns zeros for undefined payload", () => {
+    expect(extractPnlSummary(undefined)).toEqual({
+      sessionPnl: 0,
+      sessionRealized: 0,
+      sessionUnrealized: 0,
+      dailyPnl: 0,
+      dailyRealized: 0,
+      dailyUnrealized: 0,
+    });
+  });
+
   it("maps snapshots in chronological order for charts", () => {
     const points = mapSnapshotsToChartPoints(snapshotsDesc);
     expect(points).toHaveLength(2);

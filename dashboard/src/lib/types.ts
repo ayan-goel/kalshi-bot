@@ -35,8 +35,6 @@ export interface PnlData {
   session: PnlBreakdown;
   daily: PnlBreakdown;
   components: PnlComponents;
-  // compatibility field from backend
-  daily_realized_pnl: string;
   snapshots: PnlSnapshot[];
 }
 

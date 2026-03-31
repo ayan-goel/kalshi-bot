@@ -1,4 +1,4 @@
-import type { PnlSnapshot } from "./types";
+import type { PnlData, PnlSnapshot } from "./types";
 
 export type PnlMode = "session" | "daily";
 
@@ -8,6 +8,37 @@ export interface PnlChartPoint {
   equity: number;
   sessionPnl: number;
   dailyPnl: number;
+}
+
+export interface PnlSummary {
+  sessionPnl: number;
+  sessionRealized: number;
+  sessionUnrealized: number;
+  dailyPnl: number;
+  dailyRealized: number;
+  dailyUnrealized: number;
+}
+
+function toNumber(value: unknown): number {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+export function extractPnlSummary(pnl: PnlData | null | undefined): PnlSummary {
+  return {
+    sessionPnl: toNumber(pnl?.session?.pnl),
+    sessionRealized: toNumber(pnl?.session?.realized_pnl),
+    sessionUnrealized: toNumber(pnl?.session?.unrealized_pnl),
+    dailyPnl: toNumber(pnl?.daily?.pnl),
+    dailyRealized: toNumber(pnl?.daily?.realized_pnl),
+    dailyUnrealized: toNumber(pnl?.daily?.unrealized_pnl),
+  };
 }
 
 export function mapSnapshotsToChartPoints(

@@ -486,8 +486,6 @@ struct PnlResponse {
     daily: PnlBreakdownResponse,
     components: PnlComponentsResponse,
     snapshots: Vec<PnlSnapshotResponse>,
-    // Compatibility for existing clients expecting this top-level field.
-    daily_realized_pnl: String,
 }
 
 fn pnl_window_cutoff(window: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -567,7 +565,6 @@ pub async fn get_pnl(
             equity: equity.to_string(),
         },
         snapshots,
-        daily_realized_pnl: daily_realized.to_string(),
     })
 }
 

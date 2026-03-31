@@ -5,6 +5,7 @@ import { EnvSwitcher } from "@/components/env-switcher";
 import { PnlChart } from "@/components/pnl-chart";
 import { FillsTable } from "@/components/fills-table";
 import { useStatus, useBalance, usePnl, useFills } from "@/lib/hooks";
+import { extractPnlSummary } from "@/lib/pnl-utils";
 import {
   DollarSign,
   Layers,
@@ -27,13 +28,14 @@ export default function DashboardPage() {
   const available = balance ? parseFloat(balance.available) : 0;
   const portfolioValue = balance ? parseFloat(balance.portfolio_value) : 0;
 
-  const sessionPnl = pnl ? parseFloat(pnl.session.pnl) : 0;
-  const sessionRealized = pnl ? parseFloat(pnl.session.realized_pnl) : 0;
-  const sessionUnrealized = pnl ? parseFloat(pnl.session.unrealized_pnl) : 0;
-
-  const dailyPnl = pnl ? parseFloat(pnl.daily.pnl) : 0;
-  const dailyRealized = pnl ? parseFloat(pnl.daily.realized_pnl) : 0;
-  const dailyUnrealized = pnl ? parseFloat(pnl.daily.unrealized_pnl) : 0;
+  const {
+    sessionPnl,
+    sessionRealized,
+    sessionUnrealized,
+    dailyPnl,
+    dailyRealized,
+    dailyUnrealized,
+  } = extractPnlSummary(pnl);
 
   const fmt = (v: number) => `$${v.toFixed(2)}`;
   const sign = (v: number) => (v >= 0 ? "+" : "");
