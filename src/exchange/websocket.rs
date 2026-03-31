@@ -13,27 +13,28 @@ use crate::types::{Action, ExchangeEvent, MarketTicker, OrderStatus, Side};
 
 const MAX_RECONNECT_DELAY_SECS: u64 = 5;
 
+/// When `is_primary` is true this connection drives connectivity state
+/// (sends Connected / Disconnected events). Only one WS should be primary.
 pub async fn run_websocket(
     config: AppConfig,
     market_tickers: Vec<String>,
     event_tx: mpsc::Sender<ExchangeEvent>,
+    is_primary: bool,
 ) {
     let mut reconnect_delay = Duration::from_secs(1);
 
     loop {
-        info!("Connecting to WebSocket...");
-        match connect_and_stream(&config, &market_tickers, &event_tx).await {
+        info!(primary = is_primary, "Connecting to WebSocket...");
+        match connect_and_stream(&config, &market_tickers, &event_tx, is_primary).await {
             Ok(()) => {
-                // Only a clean shutdown (e.g. process exit) reaches here.
-                // Bug 1: abnormal exits now return Err so they don't reset backoff.
                 info!("WebSocket session ended cleanly");
                 reconnect_delay = Duration::from_secs(1);
             }
             Err(e) => {
                 error!(error = %e, "WebSocket connection/stream error — reconnecting");
-                // Disconnected event already sent inside connect_and_stream on stream errors.
-                // For connection-level errors (e.g. connect_async failure) send it here.
-                let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                if is_primary {
+                    let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                }
             }
         }
 
@@ -44,16 +45,19 @@ pub async fn run_websocket(
     }
 }
 
+/// `is_primary`: controls whether this connection sends Connected/Disconnected
+/// events AND subscribes to user data channels (fill, user_orders).
+/// Non-primary connections only subscribe to market data (orderbook, trade).
 async fn connect_and_stream(
     config: &AppConfig,
     market_tickers: &[String],
     event_tx: &mpsc::Sender<ExchangeEvent>,
+    is_primary: bool,
 ) -> Result<()> {
     let auth = crate::exchange::auth::KalshiAuth::from_config(config)?;
 
     let ws_url = &config.exchange.ws_url;
 
-    // Sign the WS handshake
     let ws_path = url::Url::parse(ws_url)
         .map(|u| u.path().to_string())
         .unwrap_or_else(|_| "/trade-api/ws/v2".to_string());
@@ -84,53 +88,54 @@ async fn connect_and_stream(
         .await
         .context("WebSocket connection failed")?;
 
-    info!("WebSocket connected");
-    let _ = event_tx.send(ExchangeEvent::Connected).await;
+    info!(primary = is_primary, "WebSocket connected");
+    if is_primary {
+        let _ = event_tx.send(ExchangeEvent::Connected).await;
+    }
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Subscribe to channels
     let mut cmd_id: u64 = 1;
 
-    // Subscribe to orderbook + trade for target markets
-    let market_data_sub = WsSubscribeCommand {
-        id: cmd_id,
-        cmd: "subscribe".to_string(),
-        params: WsSubscribeParams {
-            channels: vec!["orderbook_delta".to_string(), "trade".to_string()],
-            market_tickers: if market_tickers.is_empty() {
-                None
-            } else {
-                Some(market_tickers.to_vec())
+    // Market data channels — only when we have specific markets to watch
+    if !market_tickers.is_empty() {
+        let market_data_sub = WsSubscribeCommand {
+            id: cmd_id,
+            cmd: "subscribe".to_string(),
+            params: WsSubscribeParams {
+                channels: vec!["orderbook_delta".to_string(), "trade".to_string()],
+                market_tickers: Some(market_tickers.to_vec()),
             },
-        },
-    };
-    cmd_id += 1;
+        };
+        cmd_id += 1;
 
-    let msg = serde_json::to_string(&market_data_sub)?;
-    debug!(cmd = %msg, "Sending market data subscribe");
-    write
-        .send(tungstenite::Message::Text(msg))
-        .await
-        .context("Failed to send subscribe")?;
+        let msg = serde_json::to_string(&market_data_sub)?;
+        debug!(cmd = %msg, "Sending market data subscribe");
+        write
+            .send(tungstenite::Message::Text(msg))
+            .await
+            .context("Failed to send subscribe")?;
+    }
 
-    // Subscribe to fill + user_orders (no market filter, get all)
-    let user_data_sub = WsSubscribeCommand {
-        id: cmd_id,
-        cmd: "subscribe".to_string(),
-        params: WsSubscribeParams {
-            channels: vec!["fill".to_string(), "user_orders".to_string()],
-            market_tickers: None,
-        },
-    };
-    let _ = cmd_id;
+    // User data channels — only on the primary connection to avoid duplicates
+    if is_primary {
+        let user_data_sub = WsSubscribeCommand {
+            id: cmd_id,
+            cmd: "subscribe".to_string(),
+            params: WsSubscribeParams {
+                channels: vec!["fill".to_string(), "user_orders".to_string()],
+                market_tickers: None,
+            },
+        };
+        let _ = cmd_id;
 
-    let msg = serde_json::to_string(&user_data_sub)?;
-    debug!(cmd = %msg, "Sending user data subscribe");
-    write
-        .send(tungstenite::Message::Text(msg))
-        .await
-        .context("Failed to send user subscribe")?;
+        let msg = serde_json::to_string(&user_data_sub)?;
+        debug!(cmd = %msg, "Sending user data subscribe");
+        write
+            .send(tungstenite::Message::Text(msg))
+            .await
+            .context("Failed to send user subscribe")?;
+    }
 
     let mut seq_tracker: HashMap<u64, u64> = HashMap::new();
 
@@ -158,22 +163,25 @@ async fn connect_and_stream(
                     Some(Ok(tungstenite::Message::Ping(data))) => {
                         write.send(tungstenite::Message::Pong(data)).await?;
                     }
-                    // Bug 1: server-initiated close → send Disconnected and return Err for proper backoff
                     Some(Ok(tungstenite::Message::Close(_))) => {
                         info!("WebSocket closed by server");
-                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        if is_primary {
+                            let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        }
                         return Err(anyhow::anyhow!("WebSocket closed by server"));
                     }
-                    // Bug 1: read error → send Disconnected and return Err for proper backoff
                     Some(Err(e)) => {
                         error!(error = %e, "WebSocket read error");
-                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        if is_primary {
+                            let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        }
                         return Err(anyhow::anyhow!("WebSocket read error: {e}"));
                     }
-                    // Bug 1: stream ended unexpectedly → send Disconnected and return Err
                     None => {
                         info!("WebSocket stream ended");
-                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        if is_primary {
+                            let _ = event_tx.send(ExchangeEvent::Disconnected).await;
+                        }
                         return Err(anyhow::anyhow!("WebSocket stream ended unexpectedly"));
                     }
                     _ => {}

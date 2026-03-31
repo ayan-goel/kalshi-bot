@@ -33,7 +33,6 @@ async fn main() -> Result<()> {
     let config = config::AppConfig::load(Path::new("config/default.yaml"))?;
     let log_buffer = log_buffer::LogBuffer::from_env(10_000);
 
-    // Bug 21: use logging.level from YAML as default, overridden by RUST_LOG env var
     let log_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::try_new(&config.logging.level).unwrap_or_else(|_| EnvFilter::new("info"))
     });
@@ -64,7 +63,7 @@ async fn main() -> Result<()> {
     let api_port = config.api_port;
     let state_engine = Arc::new(RwLock::new(state::StateEngine::new(db_pool.clone())));
     let bot_state_machine = Arc::new(RwLock::new(BotStateMachine::new(db_pool.clone())));
-    let shared_config = Arc::new(RwLock::new(config));
+    let shared_config = Arc::new(RwLock::new(config.clone()));
 
     let (event_broadcast_tx, _) = broadcast::channel::<WsEvent>(1024);
     let event_broadcast = Arc::new(event_broadcast_tx);
@@ -101,6 +100,88 @@ async fn main() -> Result<()> {
         }
     });
 
+    // ── Process-level exchange connection ──
+    // Create REST client + fetch initial balance/positions so the dashboard
+    // always has data even before the bot is started.
+    let rest_client = exchange::rest::KalshiRestClient::new(&config)
+        .context("Failed to create REST client")?;
+
+    match rest_client.get_balance().await {
+        Ok(bal) => {
+            tracing::info!(available = %bal.available, portfolio_value = %bal.portfolio_value, "Initial balance loaded");
+            state_engine.write().await.set_balance(bal);
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to fetch initial balance"),
+    }
+
+    match rest_client.get_positions().await {
+        Ok(positions) => {
+            tracing::info!(count = positions.len(), "Initial positions loaded");
+            let mut engine = state_engine.write().await;
+            for pos in positions {
+                engine.upsert_position(pos);
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to fetch initial positions"),
+    }
+
+    // ── Process-level WebSocket ──
+    // The exchange event channel feeds data into the state engine regardless
+    // of whether the trading loop is running.
+    let (exchange_event_tx, mut exchange_event_rx) =
+        mpsc::channel::<types::ExchangeEvent>(4096);
+
+    let ws_config = config.clone();
+    let _ws_handle = tokio::spawn({
+        let event_tx = exchange_event_tx.clone();
+        async move {
+            exchange::websocket::run_websocket(ws_config, vec![], event_tx, true).await;
+        }
+    });
+
+    // ── Process-level data sync ──
+    // Forwards exchange events into the state engine and broadcasts to dashboard WS.
+    // Also periodically refreshes balance/positions from REST.
+    let data_sync_state = state_engine.clone();
+    let data_sync_broadcast = event_broadcast.clone();
+    let data_sync_rest = rest_client.clone();
+    let _data_sync_handle = tokio::spawn(async move {
+        let mut sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(120));
+        sync_tick.tick().await;
+
+        loop {
+            tokio::select! {
+                event = exchange_event_rx.recv() => {
+                    match event {
+                        Some(ev) => {
+                            broadcast_exchange_event(&ev, &data_sync_broadcast);
+                            let mut engine = data_sync_state.write().await;
+                            engine.process_event(ev).await;
+                        }
+                        None => {
+                            tracing::error!("Exchange event channel closed — WS task exited");
+                            break;
+                        }
+                    }
+                }
+                _ = sync_tick.tick() => {
+                    if let Ok(bal) = data_sync_rest.get_balance().await {
+                        let mut engine = data_sync_state.write().await;
+                        tracing::debug!(available = %bal.available, "Balance refreshed");
+                        engine.set_balance(bal);
+                    }
+                    if let Ok(positions) = data_sync_rest.get_positions().await {
+                        let mut engine = data_sync_state.write().await;
+                        for pos in positions {
+                            engine.upsert_position(pos);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // ── PnL snapshot loop ──
     let pnl_state = state_engine.clone();
     let pnl_pool = db_pool.clone();
     let pnl_broadcast = event_broadcast.clone();
@@ -345,11 +426,6 @@ async fn run_trading_loop(
 ) {
     let cfg = config.read().await.clone();
 
-    {
-        let mut engine = state_engine.write().await;
-        engine.clear_all();
-    }
-
     let rest_client = match create_rest_client(&cfg) {
         Ok(c) => c,
         Err(e) => {
@@ -366,7 +442,9 @@ async fn run_trading_loop(
         }
     };
 
-    // Startup reconciliation with market scanning
+    // Startup reconciliation — fetches balance, positions, selects markets.
+    // Does NOT clear_all: balance/positions/connectivity persist from the
+    // process-level data sync.
     match reconcile_startup(&rest_client, &state_engine, &cfg).await {
         Ok(()) => {
             tracing::info!("Startup reconciliation complete");
@@ -386,10 +464,7 @@ async fn run_trading_loop(
         }
     }
 
-    // Initialize PnL baselines:
-    // - Session baseline starts from current equity at this bot start.
-    // - Daily realized is reconstructed from fills since UTC midnight.
-    // - Daily equity baseline uses the first snapshot seen today (if any), else current equity.
+    // Initialize PnL baselines
     let now = chrono::Utc::now();
     let day_start = now
         .date_naive()
@@ -441,16 +516,26 @@ async fn run_trading_loop(
         trigger: "reconciliation_complete".to_string(),
     });
 
-    // Spawn WebSocket
-    let (event_tx, mut event_rx) = mpsc::channel::<types::ExchangeEvent>(4096);
-    let ws_config = cfg.clone();
+    // Subscribe to market-specific WS channels by re-sending the target
+    // market tickers through the WS task. The existing process-level WS
+    // was started with an empty ticker list; now we tell it which markets
+    // to watch. We accomplish this by spawning a dedicated WS for trading
+    // markets while the process-level WS handles user-level events.
     let target_markets: Vec<String> = {
         let engine = state_engine.read().await;
         engine.books().keys().map(|k| k.0.clone()).collect()
     };
+
+    let (trading_event_tx, mut trading_event_rx) =
+        mpsc::channel::<types::ExchangeEvent>(4096);
+
+    let ws_config = cfg.clone();
     let ws_markets = target_markets.clone();
-    let ws_handle = tokio::spawn(async move {
-        exchange::websocket::run_websocket(ws_config, ws_markets, event_tx).await
+    let ws_handle = tokio::spawn({
+        let tx = trading_event_tx;
+        async move {
+            exchange::websocket::run_websocket(ws_config, ws_markets, tx, false).await;
+        }
     });
 
     let risk_engine = risk::RiskEngine::new(&cfg.risk);
@@ -464,25 +549,18 @@ async fn run_trading_loop(
     let tick_interval = tokio::time::Duration::from_millis(cfg.strategy.tick_interval_ms);
     let mut tick = tokio::time::interval(tick_interval);
 
-    // Market rescan timer
     let rescan_interval =
         tokio::time::Duration::from_secs(cfg.trading.market_rescan_interval_mins as u64 * 60);
     let mut rescan_tick = tokio::time::interval(rescan_interval);
-    rescan_tick.tick().await; // consume the immediate first tick
+    rescan_tick.tick().await;
 
-    // Periodic order state sync: re-fetch resting orders every 2 minutes to
-    // purge stale orders that Kalshi cancelled (market settlement, etc.)
-    // when WS events were missed.
     let mut order_sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(120));
-    order_sync_tick.tick().await; // consume immediate first tick
+    order_sync_tick.tick().await;
 
     let max_markets = cfg.trading.max_markets_active;
 
-    // Markets that have returned `invalid_order` repeatedly are blacklisted
-    // for the current session so we stop wasting API calls on them.
     let mut skip_markets: std::collections::HashSet<types::MarketTicker> =
         std::collections::HashSet::new();
-    // Track consecutive failures per market; blacklist after threshold.
     let mut market_failures: std::collections::HashMap<types::MarketTicker, u32> =
         std::collections::HashMap::new();
     const BLACKLIST_THRESHOLD: u32 = 3;
@@ -509,9 +587,8 @@ async fn run_trading_loop(
                 let _ = bsm.transition(BotState::Stopped, "orders_cancelled", None).await;
                 break;
             }
-            event = event_rx.recv() => {
+            event = trading_event_rx.recv() => {
                 match event {
-                    // Bug 4: handle book resync request by fetching REST snapshot
                     Some(types::ExchangeEvent::BookResyncNeeded { market_ticker }) => {
                         tracing::info!(market = %market_ticker, "Performing REST book resync after sequence gap");
                         match rest_client.get_orderbook(&market_ticker.0).await {
@@ -545,8 +622,6 @@ async fn run_trading_loop(
                             disconnect_pause_logged = false;
                         }
 
-                        // Best-effort one-time cancel-all on disconnect edge.
-                        // This avoids repeated cancel spam while still reducing stale exposure.
                         if is_disconnect && !disconnect_cancel_attempted {
                             tracing::warn!("Exchange disconnected — issuing one-time best-effort cancel_all");
                             let engine = state_engine.read().await;
@@ -555,8 +630,7 @@ async fn run_trading_loop(
                         }
                     }
                     None => {
-                        tracing::error!("Event channel closed in trading loop — WS task exited");
-                        // Bug 17: transition to Error so the API shows the correct state
+                        tracing::error!("Trading event channel closed — WS task exited");
                         let mut bsm = bot_state.write().await;
                         let _ = bsm
                             .transition(
@@ -573,17 +647,10 @@ async fn run_trading_loop(
                 }
             }
             _ = order_sync_tick.tick() => {
-                // ── Balance refresh ──────────────────────────────────────────
-                // Kalshi's balance updates in real-time as fills happen.
-                // We only fetched it at startup; refresh now so the dashboard
-                // reflects the actual cash on hand.
                 match rest_client.get_balance().await {
                     Ok(bal) => {
                         let mut engine = state_engine.write().await;
-                        tracing::debug!(
-                            available = %bal.available,
-                            "Balance refreshed"
-                        );
+                        tracing::debug!(available = %bal.available, "Balance refreshed");
                         engine.set_balance(bal);
                     }
                     Err(e) => {
@@ -591,9 +658,6 @@ async fn run_trading_loop(
                     }
                 }
 
-                // ── Position sync ─────────────────────────────────────────────
-                // Re-fetch positions so unrealized_pnl and contract counts stay
-                // accurate without relying solely on WS fill events.
                 match rest_client.get_positions().await {
                     Ok(positions) => {
                         let mut engine = state_engine.write().await;
@@ -606,9 +670,6 @@ async fn run_trading_loop(
                     }
                 }
 
-                // ── Open order sync ───────────────────────────────────────────
-                // Prune stale orders that Kalshi cancelled (settled markets, etc.)
-                // when WS events were missed.
                 match rest_client.get_orders(Some("resting")).await {
                     Ok(live_orders) => {
                         let live_ids: std::collections::HashSet<String> =
@@ -637,7 +698,6 @@ async fn run_trading_loop(
             }
             _ = rescan_tick.tick() => {
                 tracing::info!("Periodic market rescan triggered");
-                // Re-scan is a best-effort background task; failures are logged and ignored.
                 let cfg = config.read().await;
                 if cfg.trading.markets_allowlist.is_empty() {
                     let scanner = market_scanner::MarketScanner::new(&cfg.trading);
@@ -648,13 +708,11 @@ async fn run_trading_loop(
                     ).await {
                         Ok((new_tickers, scored)) => {
                             let mut engine = state_engine.write().await;
-                            // Add new markets
                             for ticker in &new_tickers {
                                 let mt = types::MarketTicker::from(ticker.as_str());
                                 if engine.get_book(&mt).is_none() {
                                     engine.ensure_book(mt.clone());
                                     if let Some(sm) = scored.iter().find(|s| s.ticker == *ticker) {
-                                        // Fetch full market data for metadata
                                         match rest_client.get_markets(None, Some(1)).await {
                                             Ok(markets) => {
                                                 if let Some(m) = markets.into_iter().find(|m| m.ticker == *ticker) {
@@ -670,8 +728,6 @@ async fn run_trading_loop(
                                     tracing::info!(ticker = %ticker, "New market added from rescan");
                                 }
                             }
-                            // Note: we don't remove old markets mid-session to avoid
-                            // orphan order complexity. They'll be cleaned up on next restart.
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Market rescan failed");
@@ -730,7 +786,6 @@ async fn run_trading_loop(
                     disconnect_pause_logged = false;
                 }
 
-                // Update event detector for all markets
                 let all_tickers: Vec<types::MarketTicker> = engine.books().keys().cloned().collect();
                 for ticker in &all_tickers {
                     if let Some(book) = engine.get_book(ticker) {
@@ -738,7 +793,6 @@ async fn run_trading_loop(
                     }
                 }
 
-                // Compute target quotes with all new engine features
                 let target_quotes = compute_target_quotes(
                     &engine,
                     &fair_value_engine,
@@ -758,8 +812,6 @@ async fn run_trading_loop(
                     .await;
                 drop(engine);
 
-                // Blacklist markets that repeatedly return invalid_order.
-                // This prevents hammering the API on markets that are closed/settled.
                 for market in failed_markets {
                     let count = market_failures.entry(market.clone()).or_insert(0);
                     *count += 1;
@@ -831,7 +883,6 @@ async fn reconcile_startup(
         .await
         .context("reconcile step 4: market scanning failed")?;
 
-    // Now fetch full metadata for selected markets and set up books
     let all_market_data = rest_client
         .get_all_markets(Some("open"), None, None)
         .await
@@ -867,7 +918,6 @@ async fn reconcile_startup(
     Ok(())
 }
 
-/// Convert a REST orderbook price-level list (Vec<[price, qty]>) to PriceLevel vec.
 fn orderbook_data_to_price_levels(levels: &Option<Vec<Vec<String>>>) -> Vec<types::PriceLevel> {
     use rust_decimal::Decimal;
     let Some(v) = levels else { return vec![] };
@@ -950,9 +1000,6 @@ fn compute_target_quotes(
     let balance = state.balance().clone();
     let all_tickers: Vec<types::MarketTicker> = state.books().keys().cloned().collect();
 
-    // Phase 1: generate quotes for each market; defer risk check until after cross-market
-    // Bug 16: cross-market adjustment happens after the first risk pass, so we re-check
-    // risk on the final adjusted quotes.
     let mut pre_adjust: Vec<(types::TargetQuote, rust_decimal::Decimal)> = Vec::new();
 
     for ticker in &all_tickers {
@@ -1022,18 +1069,15 @@ fn compute_target_quotes(
         }
     }
 
-    // Phase 2: apply cross-market consistency adjustments
     let raw_quotes: Vec<types::TargetQuote> = pre_adjust.iter().map(|(q, _)| q.clone()).collect();
     let adjusted_quotes = cross_market.adjust_quotes(raw_quotes, state);
 
-    // Build a fair-price lookup for the post-adjustment risk check
     let fv_by_ticker: std::collections::HashMap<&types::MarketTicker, rust_decimal::Decimal> =
         pre_adjust
             .iter()
             .map(|(q, fv)| (&q.market_ticker, *fv))
             .collect();
 
-    // Phase 3: run risk check on the final (cross-market-adjusted) quotes
     let mut quotes = Vec::new();
     for target in adjusted_quotes {
         let fair = fv_by_ticker.get(&target.market_ticker).copied();
