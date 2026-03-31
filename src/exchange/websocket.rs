@@ -8,33 +8,43 @@ use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
 
 use crate::config::AppConfig;
-use crate::exchange::models::{WsMessage, WsSubscribeCommand, WsSubscribeParams};
+use crate::exchange::models::{WsSubscribeCommand, WsSubscribeParams};
 use crate::types::{Action, ExchangeEvent, MarketTicker, OrderStatus, Side};
 
 const MAX_RECONNECT_DELAY_SECS: u64 = 5;
 
-/// When `is_primary` is true this connection drives connectivity state
-/// (sends Connected / Disconnected events). Only one WS should be primary.
+/// Commands sent to the WS task to dynamically change subscriptions.
+#[derive(Debug, Clone)]
+pub enum WsCommand {
+    SubscribeMarkets(Vec<String>),
+    UnsubscribeAll,
+}
+
 pub async fn run_websocket(
     config: AppConfig,
-    market_tickers: Vec<String>,
     event_tx: mpsc::Sender<ExchangeEvent>,
-    is_primary: bool,
+    mut cmd_rx: mpsc::Receiver<WsCommand>,
 ) {
     let mut reconnect_delay = Duration::from_secs(1);
+    let mut subscribed_markets: Vec<String> = Vec::new();
 
     loop {
-        info!(primary = is_primary, "Connecting to WebSocket...");
-        match connect_and_stream(&config, &market_tickers, &event_tx, is_primary).await {
+        info!("Connecting to WebSocket...");
+        match connect_and_stream(
+            &config,
+            &event_tx,
+            &mut cmd_rx,
+            &mut subscribed_markets,
+        )
+        .await
+        {
             Ok(()) => {
                 info!("WebSocket session ended cleanly");
                 reconnect_delay = Duration::from_secs(1);
             }
             Err(e) => {
                 error!(error = %e, "WebSocket connection/stream error — reconnecting");
-                if is_primary {
-                    let _ = event_tx.send(ExchangeEvent::Disconnected).await;
-                }
+                let _ = event_tx.send(ExchangeEvent::Disconnected).await;
             }
         }
 
@@ -45,14 +55,11 @@ pub async fn run_websocket(
     }
 }
 
-/// `is_primary`: controls whether this connection sends Connected/Disconnected
-/// events AND subscribes to user data channels (fill, user_orders).
-/// Non-primary connections only subscribe to market data (orderbook, trade).
 async fn connect_and_stream(
     config: &AppConfig,
-    market_tickers: &[String],
     event_tx: &mpsc::Sender<ExchangeEvent>,
-    is_primary: bool,
+    cmd_rx: &mut mpsc::Receiver<WsCommand>,
+    subscribed_markets: &mut Vec<String>,
 ) -> Result<()> {
     let auth = crate::exchange::auth::KalshiAuth::from_config(config)?;
 
@@ -88,58 +95,53 @@ async fn connect_and_stream(
         .await
         .context("WebSocket connection failed")?;
 
-    info!(primary = is_primary, "WebSocket connected");
-    if is_primary {
-        let _ = event_tx.send(ExchangeEvent::Connected).await;
-    }
+    info!("WebSocket connected");
+    let _ = event_tx.send(ExchangeEvent::Connected).await;
 
     let (mut write, mut read) = ws_stream.split();
 
     let mut cmd_id: u64 = 1;
 
-    // Market data channels — only when we have specific markets to watch
-    if !market_tickers.is_empty() {
+    // Always subscribe to user data channels (fills + order updates)
+    let user_data_sub = WsSubscribeCommand {
+        id: cmd_id,
+        cmd: "subscribe".to_string(),
+        params: WsSubscribeParams {
+            channels: vec!["fill".to_string(), "user_orders".to_string()],
+            market_tickers: None,
+        },
+    };
+    cmd_id += 1;
+
+    let msg = serde_json::to_string(&user_data_sub)?;
+    debug!(cmd = %msg, "Sending user data subscribe");
+    write
+        .send(tungstenite::Message::Text(msg))
+        .await
+        .context("Failed to send user subscribe")?;
+
+    // Re-subscribe to previously-active markets on reconnect
+    if !subscribed_markets.is_empty() {
         let market_data_sub = WsSubscribeCommand {
             id: cmd_id,
             cmd: "subscribe".to_string(),
             params: WsSubscribeParams {
                 channels: vec!["orderbook_delta".to_string(), "trade".to_string()],
-                market_tickers: Some(market_tickers.to_vec()),
+                market_tickers: Some(subscribed_markets.clone()),
             },
         };
         cmd_id += 1;
 
         let msg = serde_json::to_string(&market_data_sub)?;
-        debug!(cmd = %msg, "Sending market data subscribe");
+        debug!(cmd = %msg, "Re-subscribing to {} markets after reconnect", subscribed_markets.len());
         write
             .send(tungstenite::Message::Text(msg))
             .await
-            .context("Failed to send subscribe")?;
-    }
-
-    // User data channels — only on the primary connection to avoid duplicates
-    if is_primary {
-        let user_data_sub = WsSubscribeCommand {
-            id: cmd_id,
-            cmd: "subscribe".to_string(),
-            params: WsSubscribeParams {
-                channels: vec!["fill".to_string(), "user_orders".to_string()],
-                market_tickers: None,
-            },
-        };
-        let _ = cmd_id;
-
-        let msg = serde_json::to_string(&user_data_sub)?;
-        debug!(cmd = %msg, "Sending user data subscribe");
-        write
-            .send(tungstenite::Message::Text(msg))
-            .await
-            .context("Failed to send user subscribe")?;
+            .context("Failed to send market data re-subscribe")?;
     }
 
     let mut seq_tracker: HashMap<u64, u64> = HashMap::new();
 
-    // Spawn a ping task
     let (ping_tx, mut ping_rx) = mpsc::channel::<()>(1);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
@@ -165,23 +167,17 @@ async fn connect_and_stream(
                     }
                     Some(Ok(tungstenite::Message::Close(_))) => {
                         info!("WebSocket closed by server");
-                        if is_primary {
-                            let _ = event_tx.send(ExchangeEvent::Disconnected).await;
-                        }
+                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
                         return Err(anyhow::anyhow!("WebSocket closed by server"));
                     }
                     Some(Err(e)) => {
                         error!(error = %e, "WebSocket read error");
-                        if is_primary {
-                            let _ = event_tx.send(ExchangeEvent::Disconnected).await;
-                        }
+                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
                         return Err(anyhow::anyhow!("WebSocket read error: {e}"));
                     }
                     None => {
                         info!("WebSocket stream ended");
-                        if is_primary {
-                            let _ = event_tx.send(ExchangeEvent::Disconnected).await;
-                        }
+                        let _ = event_tx.send(ExchangeEvent::Disconnected).await;
                         return Err(anyhow::anyhow!("WebSocket stream ended unexpectedly"));
                     }
                     _ => {}
@@ -190,9 +186,60 @@ async fn connect_and_stream(
             _ = ping_rx.recv() => {
                 write.send(tungstenite::Message::Ping(vec![])).await?;
             }
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(WsCommand::SubscribeMarkets(tickers)) => {
+                        if tickers.is_empty() {
+                            continue;
+                        }
+                        info!(count = tickers.len(), "Subscribing to market data channels");
+                        let sub = WsSubscribeCommand {
+                            id: cmd_id,
+                            cmd: "subscribe".to_string(),
+                            params: WsSubscribeParams {
+                                channels: vec!["orderbook_delta".to_string(), "trade".to_string()],
+                                market_tickers: Some(tickers.clone()),
+                            },
+                        };
+                        cmd_id += 1;
+                        let msg = serde_json::to_string(&sub)?;
+                        write.send(tungstenite::Message::Text(msg)).await
+                            .context("Failed to send market subscribe")?;
+                        *subscribed_markets = tickers;
+                    }
+                    Some(WsCommand::UnsubscribeAll) => {
+                        if subscribed_markets.is_empty() {
+                            continue;
+                        }
+                        info!(count = subscribed_markets.len(), "Unsubscribing from market data channels");
+                        let unsub = WsSubscribeCommand {
+                            id: cmd_id,
+                            cmd: "unsubscribe".to_string(),
+                            params: WsSubscribeParams {
+                                channels: vec!["orderbook_delta".to_string(), "trade".to_string()],
+                                market_tickers: Some(subscribed_markets.clone()),
+                            },
+                        };
+                        cmd_id += 1;
+                        let msg = serde_json::to_string(&unsub)?;
+                        if let Err(e) = write.send(tungstenite::Message::Text(msg)).await {
+                            warn!(error = %e, "Failed to send market unsubscribe");
+                        }
+                        subscribed_markets.clear();
+                    }
+                    None => {
+                        info!("WS command channel closed");
+                        break;
+                    }
+                }
+            }
         }
     }
+
+    Ok(())
 }
+
+use crate::exchange::models::WsMessage;
 
 async fn handle_ws_message(
     text: &str,
@@ -201,7 +248,6 @@ async fn handle_ws_message(
 ) -> Result<()> {
     let ws_msg: WsMessage = serde_json::from_str(text).context("Failed to parse WS message")?;
 
-    // Track sequence numbers and trigger book resync on gaps (Bug 4)
     if let (Some(sid), Some(seq)) = (ws_msg.sid, ws_msg.seq) {
         let expected = seq_tracker.entry(sid).or_insert(0);
         if *expected > 0 && seq != *expected + 1 && ws_msg.msg_type != "orderbook_snapshot" {
@@ -211,8 +257,6 @@ async fn handle_ws_message(
                 got = seq,
                 "Sequence gap detected — requesting book resync"
             );
-            // For orderbook messages, request a REST snapshot resync so the book
-            // is repaired before further deltas are applied.
             if matches!(ws_msg.msg_type.as_str(), "orderbook_delta") {
                 if let Some(ticker) = ws_msg
                     .msg
@@ -258,7 +302,6 @@ async fn handle_ws_message(
                     .get("market_ticker")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                // Bug 5: case-insensitive side matching
                 let side = match msg.get("side").and_then(|v| v.as_str()) {
                     Some(s) if s.eq_ignore_ascii_case("yes") => Side::Yes,
                     _ => Side::No,
@@ -291,7 +334,6 @@ async fn handle_ws_message(
                     .get("market_ticker")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                // Bug 6: handle integer yes_price field (value is in cents, not dollars)
                 let price = msg
                     .get("yes_price_dollars")
                     .and_then(|v| v.as_str())
@@ -301,7 +343,6 @@ async fn handle_ws_message(
                             if let Some(s) = v.as_str() {
                                 s.parse::<Decimal>().ok()
                             } else {
-                                // Integer field is in cents
                                 v.as_i64().map(|n| Decimal::new(n, 2))
                             }
                         })
@@ -312,7 +353,6 @@ async fn handle_ws_message(
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<Decimal>().ok())
                     .unwrap_or(Decimal::ONE);
-                // Bug 5: case-insensitive taker_side matching
                 let taker_side = match msg.get("taker_side").and_then(|v| v.as_str()) {
                     Some(s) if s.eq_ignore_ascii_case("yes") => Side::Yes,
                     _ => Side::No,
@@ -345,7 +385,6 @@ async fn handle_ws_message(
                     .get("market_ticker")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                // Bug 5: case-insensitive side/action matching
                 let side = match msg.get("side").and_then(|v| v.as_str()) {
                     Some(s) if s.eq_ignore_ascii_case("yes") => Side::Yes,
                     _ => Side::No,
@@ -354,7 +393,6 @@ async fn handle_ws_message(
                     Some(s) if s.eq_ignore_ascii_case("buy") => Action::Buy,
                     _ => Action::Sell,
                 };
-                // Parse price: try yes_price_dollars, then no_price_dollars, then integer cents
                 let price = msg
                     .get("yes_price_dollars")
                     .or_else(|| msg.get("no_price_dollars"))
@@ -419,7 +457,6 @@ async fn handle_ws_message(
                     "executed" => OrderStatus::Executed,
                     _ => OrderStatus::Canceled,
                 };
-                // Bug 5: case-insensitive side/action matching
                 let side = match msg.get("side").and_then(|v| v.as_str()) {
                     Some(s) if s.eq_ignore_ascii_case("yes") => Side::Yes,
                     _ => Side::No,
@@ -428,7 +465,6 @@ async fn handle_ws_message(
                     Some(s) if s.eq_ignore_ascii_case("buy") => Action::Buy,
                     _ => Action::Sell,
                 };
-                // Bug 7: try yes_price_dollars, then no_price_dollars, then integer cents
                 let price = msg
                     .get("yes_price_dollars")
                     .or_else(|| msg.get("no_price_dollars"))

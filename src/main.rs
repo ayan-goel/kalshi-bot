@@ -100,12 +100,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── Process-level exchange connection ──
-    // Create REST client + fetch initial balance/positions so the dashboard
-    // always has data even before the bot is started.
+    // ── Process-level REST client ──
     let rest_client = exchange::rest::KalshiRestClient::new(&config)
         .context("Failed to create REST client")?;
 
+    // Fetch initial balance + positions so the dashboard has data at boot
     match rest_client.get_balance().await {
         Ok(bal) => {
             tracing::info!(available = %bal.available, portfolio_value = %bal.portfolio_value, "Initial balance loaded");
@@ -125,23 +124,49 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "Failed to fetch initial positions"),
     }
 
-    // ── Process-level WebSocket ──
-    // The exchange event channel feeds data into the state engine regardless
-    // of whether the trading loop is running.
-    let (exchange_event_tx, mut exchange_event_rx) =
-        mpsc::channel::<types::ExchangeEvent>(4096);
+    // Initialize daily PnL baseline at boot so the API returns correct
+    // values even before the trading loop has started.
+    {
+        let now = chrono::Utc::now();
+        let day_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .expect("valid midnight")
+            .and_utc();
+
+        let daily_realized = db::sum_fill_cashflow_since(&db_pool, day_start)
+            .await
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+
+        let engine = state_engine.read().await;
+        let fallback_equity = engine.current_equity();
+        drop(engine);
+
+        let daily_start_equity =
+            match db::get_first_equity_snapshot_since(&db_pool, day_start).await {
+                Ok(Some(v)) => v,
+                _ => fallback_equity,
+            };
+
+        let mut engine = state_engine.write().await;
+        engine.set_daily_baseline(now.date_naive(), daily_realized, daily_start_equity);
+    }
+
+    // ── Single process-level WebSocket ──
+    // Subscribes to user data (fill, user_orders) immediately.
+    // Market data subscriptions are added dynamically when trading starts.
+    let (ws_event_tx, mut ws_event_rx) = mpsc::channel::<types::ExchangeEvent>(4096);
+    let (ws_cmd_tx, ws_cmd_rx) = mpsc::channel::<exchange::websocket::WsCommand>(64);
 
     let ws_config = config.clone();
-    let _ws_handle = tokio::spawn({
-        let event_tx = exchange_event_tx.clone();
-        async move {
-            exchange::websocket::run_websocket(ws_config, vec![], event_tx, true).await;
-        }
+    let _ws_handle = tokio::spawn(async move {
+        exchange::websocket::run_websocket(ws_config, ws_event_tx, ws_cmd_rx).await;
     });
 
     // ── Process-level data sync ──
-    // Forwards exchange events into the state engine and broadcasts to dashboard WS.
-    // Also periodically refreshes balance/positions from REST.
+    // Single task that: reads ALL exchange events, updates state engine,
+    // broadcasts to dashboard WS, handles book resyncs, and periodically
+    // refreshes balance/positions via REST.
     let data_sync_state = state_engine.clone();
     let data_sync_broadcast = event_broadcast.clone();
     let data_sync_rest = rest_client.clone();
@@ -151,8 +176,27 @@ async fn main() -> Result<()> {
 
         loop {
             tokio::select! {
-                event = exchange_event_rx.recv() => {
+                event = ws_event_rx.recv() => {
                     match event {
+                        Some(types::ExchangeEvent::BookResyncNeeded { market_ticker }) => {
+                            tracing::info!(market = %market_ticker, "Performing REST book resync after sequence gap");
+                            match data_sync_rest.get_orderbook(&market_ticker.0).await {
+                                Ok(ob_data) => {
+                                    let yes_bids = orderbook_data_to_price_levels(&ob_data.yes_dollars);
+                                    let no_bids = orderbook_data_to_price_levels(&ob_data.no_dollars);
+                                    let mut engine = data_sync_state.write().await;
+                                    engine.process_event(types::ExchangeEvent::BookSnapshot {
+                                        market_ticker,
+                                        yes_bids,
+                                        no_bids,
+                                        seq: 0,
+                                    }).await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, market = %market_ticker, "REST book resync failed");
+                                }
+                            }
+                        }
                         Some(ev) => {
                             broadcast_exchange_event(&ev, &data_sync_broadcast);
                             let mut engine = data_sync_state.write().await;
@@ -253,6 +297,7 @@ async fn main() -> Result<()> {
         shared_config,
         db_pool,
         event_broadcast,
+        ws_cmd_tx,
     )
     .await;
 
@@ -294,6 +339,7 @@ async fn run_bot_control_loop(
     config: api::SharedConfig,
     db_pool: sqlx::PgPool,
     event_broadcast: api::EventBroadcast,
+    ws_cmd_tx: mpsc::Sender<exchange::websocket::WsCommand>,
 ) {
     let mut trading_handle: Option<tokio::task::JoinHandle<()>> = None;
     let mut trading_shutdown_tx: Option<mpsc::Sender<()>> = None;
@@ -333,9 +379,10 @@ async fn run_bot_control_loop(
                         let cfg = config.clone();
                         let pool = db_pool.clone();
                         let broadcast = event_broadcast.clone();
+                        let ws_tx = ws_cmd_tx.clone();
 
                         trading_handle = Some(tokio::spawn(async move {
-                            run_trading_loop(se, bs, cfg, pool, broadcast, shutdown_rx).await;
+                            run_trading_loop(se, bs, cfg, pool, broadcast, shutdown_rx, ws_tx).await;
                         }));
                     }
                     Some(api::BotCommand::Stop) => {
@@ -423,6 +470,7 @@ async fn run_trading_loop(
     db_pool: sqlx::PgPool,
     event_broadcast: api::EventBroadcast,
     mut shutdown_rx: mpsc::Receiver<()>,
+    ws_cmd_tx: mpsc::Sender<exchange::websocket::WsCommand>,
 ) {
     let cfg = config.read().await.clone();
 
@@ -442,9 +490,6 @@ async fn run_trading_loop(
         }
     };
 
-    // Startup reconciliation — fetches balance, positions, selects markets.
-    // Does NOT clear_all: balance/positions/connectivity persist from the
-    // process-level data sync.
     match reconcile_startup(&rest_client, &state_engine, &cfg).await {
         Ok(()) => {
             tracing::info!("Startup reconciliation complete");
@@ -464,7 +509,7 @@ async fn run_trading_loop(
         }
     }
 
-    // Initialize PnL baselines
+    // Initialize session PnL baselines (daily baseline was set at boot)
     let now = chrono::Utc::now();
     let day_start = now
         .date_naive()
@@ -516,27 +561,19 @@ async fn run_trading_loop(
         trigger: "reconciliation_complete".to_string(),
     });
 
-    // Subscribe to market-specific WS channels by re-sending the target
-    // market tickers through the WS task. The existing process-level WS
-    // was started with an empty ticker list; now we tell it which markets
-    // to watch. We accomplish this by spawning a dedicated WS for trading
-    // markets while the process-level WS handles user-level events.
+    // Tell the WS to subscribe to market data for our selected markets
     let target_markets: Vec<String> = {
         let engine = state_engine.read().await;
         engine.books().keys().map(|k| k.0.clone()).collect()
     };
 
-    let (trading_event_tx, mut trading_event_rx) =
-        mpsc::channel::<types::ExchangeEvent>(4096);
-
-    let ws_config = cfg.clone();
-    let ws_markets = target_markets.clone();
-    let ws_handle = tokio::spawn({
-        let tx = trading_event_tx;
-        async move {
-            exchange::websocket::run_websocket(ws_config, ws_markets, tx, false).await;
-        }
-    });
+    if !target_markets.is_empty() {
+        let _ = ws_cmd_tx
+            .send(exchange::websocket::WsCommand::SubscribeMarkets(
+                target_markets.clone(),
+            ))
+            .await;
+    }
 
     let risk_engine = risk::RiskEngine::new(&cfg.risk);
     let strategy_engine = strategy::MarketMakerStrategy::new(&cfg.strategy);
@@ -582,69 +619,15 @@ async fn run_trading_loop(
                 execution_engine.cancel_all(&engine).await;
                 drop(engine);
 
+                // Unsubscribe from market data on stop
+                let _ = ws_cmd_tx
+                    .send(exchange::websocket::WsCommand::UnsubscribeAll)
+                    .await;
+
                 let mut bsm = bot_state.write().await;
                 let _ = bsm.transition(BotState::Stopping, "shutdown", None).await;
                 let _ = bsm.transition(BotState::Stopped, "orders_cancelled", None).await;
                 break;
-            }
-            event = trading_event_rx.recv() => {
-                match event {
-                    Some(types::ExchangeEvent::BookResyncNeeded { market_ticker }) => {
-                        tracing::info!(market = %market_ticker, "Performing REST book resync after sequence gap");
-                        match rest_client.get_orderbook(&market_ticker.0).await {
-                            Ok(ob_data) => {
-                                let yes_bids = orderbook_data_to_price_levels(&ob_data.yes_dollars);
-                                let no_bids = orderbook_data_to_price_levels(&ob_data.no_dollars);
-                                let mut engine = state_engine.write().await;
-                                engine.process_event(types::ExchangeEvent::BookSnapshot {
-                                    market_ticker,
-                                    yes_bids,
-                                    no_bids,
-                                    seq: 0,
-                                }).await;
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, market = %market_ticker, "REST book resync failed");
-                            }
-                        }
-                    }
-                    Some(ev) => {
-                        let is_disconnect = matches!(&ev, types::ExchangeEvent::Disconnected);
-                        let is_connect = matches!(&ev, types::ExchangeEvent::Connected);
-
-                        broadcast_exchange_event(&ev, &event_broadcast);
-                        let mut engine = state_engine.write().await;
-                        engine.process_event(ev).await;
-                        drop(engine);
-
-                        if is_connect {
-                            disconnect_cancel_attempted = false;
-                            disconnect_pause_logged = false;
-                        }
-
-                        if is_disconnect && !disconnect_cancel_attempted {
-                            tracing::warn!("Exchange disconnected — issuing one-time best-effort cancel_all");
-                            let engine = state_engine.read().await;
-                            execution_engine.cancel_all(&engine).await;
-                            disconnect_cancel_attempted = true;
-                        }
-                    }
-                    None => {
-                        tracing::error!("Trading event channel closed — WS task exited");
-                        let mut bsm = bot_state.write().await;
-                        let _ = bsm
-                            .transition(
-                                BotState::Error,
-                                "event_channel_closed",
-                                Some(serde_json::json!({
-                                    "message": "WebSocket event channel closed unexpectedly"
-                                })),
-                            )
-                            .await;
-                        drop(bsm);
-                        break;
-                    }
-                }
             }
             _ = order_sync_tick.tick() => {
                 match rest_client.get_balance().await {
@@ -708,6 +691,7 @@ async fn run_trading_loop(
                     ).await {
                         Ok((new_tickers, scored)) => {
                             let mut engine = state_engine.write().await;
+                            let mut new_markets = Vec::new();
                             for ticker in &new_tickers {
                                 let mt = types::MarketTicker::from(ticker.as_str());
                                 if engine.get_book(&mt).is_none() {
@@ -725,8 +709,21 @@ async fn run_trading_loop(
                                             }
                                         }
                                     }
+                                    new_markets.push(ticker.clone());
                                     tracing::info!(ticker = %ticker, "New market added from rescan");
                                 }
+                            }
+                            drop(engine);
+
+                            // Subscribe the WS to new markets
+                            if !new_markets.is_empty() {
+                                let all_tickers: Vec<String> = {
+                                    let engine = state_engine.read().await;
+                                    engine.books().keys().map(|k| k.0.clone()).collect()
+                                };
+                                let _ = ws_cmd_tx
+                                    .send(exchange::websocket::WsCommand::SubscribeMarkets(all_tickers))
+                                    .await;
                             }
                         }
                         Err(e) => {
@@ -751,6 +748,10 @@ async fn run_trading_loop(
                     let engine_w = state_engine.write().await;
                     execution_engine.cancel_all(&engine_w).await;
                     drop(engine_w);
+
+                    let _ = ws_cmd_tx
+                        .send(exchange::websocket::WsCommand::UnsubscribeAll)
+                        .await;
 
                     let mut bsm = bot_state.write().await;
                     let _ = bsm.transition(
@@ -781,9 +782,14 @@ async fn run_trading_loop(
                     }
                     drop(engine);
                     continue;
-                } else if disconnect_pause_logged {
-                    tracing::info!("Exchange reconnected; resuming quote generation");
-                    disconnect_pause_logged = false;
+                } else {
+                    if disconnect_pause_logged {
+                        tracing::info!("Exchange reconnected; resuming quote generation");
+                        disconnect_pause_logged = false;
+                    }
+                    if disconnect_cancel_attempted {
+                        disconnect_cancel_attempted = false;
+                    }
                 }
 
                 let all_tickers: Vec<types::MarketTicker> = engine.books().keys().cloned().collect();
@@ -828,7 +834,6 @@ async fn run_trading_loop(
         }
     }
 
-    ws_handle.abort();
     tracing::info!("Trading loop ended");
 }
 

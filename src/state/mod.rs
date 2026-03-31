@@ -260,6 +260,19 @@ impl StateEngine {
             .map(|secs| secs.max(0))
     }
 
+    /// Set daily PnL baseline without starting a session.
+    /// Called at boot so the API returns correct daily PnL before trading starts.
+    pub fn set_daily_baseline(
+        &mut self,
+        day: chrono::NaiveDate,
+        daily_realized_pnl: Decimal,
+        daily_start_equity: Decimal,
+    ) {
+        self.daily_realized_day = day;
+        self.daily_realized_pnl = daily_realized_pnl;
+        self.daily_start_equity = daily_start_equity;
+    }
+
     pub fn initialize_pnl_context(
         &mut self,
         now: DateTime<Utc>,
