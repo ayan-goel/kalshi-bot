@@ -1,3 +1,4 @@
+use chrono::Utc;
 use rust_decimal::Decimal;
 
 use crate::config::RiskConfig;
@@ -11,6 +12,7 @@ pub struct RiskEngine {
     max_total_reserved: Decimal,
     max_open_orders: u32,
     cancel_all_on_disconnect: bool,
+    disconnect_timeout_secs: u64,
     max_capital_per_market: Decimal,
     max_portfolio_utilization: Decimal,
     max_fair_deviation: Decimal,
@@ -25,10 +27,15 @@ impl RiskEngine {
             max_total_reserved: config.max_total_reserved,
             max_open_orders: config.max_open_orders,
             cancel_all_on_disconnect: config.cancel_all_on_disconnect,
+            disconnect_timeout_secs: config.disconnect_timeout_secs,
             max_capital_per_market: config.max_capital_per_market,
             max_portfolio_utilization: config.max_portfolio_utilization,
             max_fair_deviation: config.max_fair_deviation,
         }
+    }
+
+    pub fn disconnect_timeout_secs(&self) -> u64 {
+        self.disconnect_timeout_secs
     }
 
     /// Check if kill switch should trigger. Returns None if OK, Some(reason) if triggered.
@@ -37,13 +44,19 @@ impl RiskEngine {
             && state.ever_connected()
             && state.connectivity() == ConnectivityState::Disconnected
         {
-            return Some("Exchange disconnected".to_string());
+            let disconnected_for_secs = state.disconnected_for_secs(Utc::now()).unwrap_or(0);
+            if disconnected_for_secs >= self.disconnect_timeout_secs as i64 {
+                return Some(format!(
+                    "Exchange disconnected for {}s (timeout {}s)",
+                    disconnected_for_secs, self.disconnect_timeout_secs
+                ));
+            }
         }
 
-        if state.daily_pnl() < -self.max_loss_daily {
+        if state.daily_total_pnl() < -self.max_loss_daily {
             return Some(format!(
                 "Daily loss {} exceeds limit {}",
-                state.daily_pnl(),
+                state.daily_total_pnl(),
                 self.max_loss_daily
             ));
         }
@@ -177,10 +190,7 @@ impl RiskEngine {
         if let (Some(bid), Some(ask)) = (&quote.yes_bid, &quote.yes_ask) {
             if ask.price <= bid.price {
                 return RiskDecision::Rejected {
-                    reason: format!(
-                        "Inverted spread: bid={} >= ask={}",
-                        bid.price, ask.price
-                    ),
+                    reason: format!("Inverted spread: bid={} >= ask={}", bid.price, ask.price),
                 };
             }
         }

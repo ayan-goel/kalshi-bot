@@ -34,11 +34,9 @@ async fn main() -> Result<()> {
     let log_buffer = log_buffer::LogBuffer::from_env(10_000);
 
     // Bug 21: use logging.level from YAML as default, overridden by RUST_LOG env var
-    let log_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::try_new(&config.logging.level)
-                .unwrap_or_else(|_| EnvFilter::new("info"))
-        });
+    let log_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::try_new(&config.logging.level).unwrap_or_else(|_| EnvFilter::new("info"))
+    });
 
     if config.logging.json {
         tracing_subscriber::registry()
@@ -75,7 +73,9 @@ async fn main() -> Result<()> {
 
     let api_secret = std::env::var("BOT_API_SECRET").ok();
     if api_secret.is_some() {
-        tracing::info!("API secret is set — all endpoints (except /api/health) require Bearer token");
+        tracing::info!(
+            "API secret is set — all endpoints (except /api/health) require Bearer token"
+        );
     } else {
         tracing::warn!("BOT_API_SECRET is not set — API is unauthenticated!");
     }
@@ -104,40 +104,63 @@ async fn main() -> Result<()> {
     let pnl_state = state_engine.clone();
     let pnl_pool = db_pool.clone();
     let pnl_broadcast = event_broadcast.clone();
+    let pnl_bot_state = bot_state_machine.clone();
     let pnl_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let engine = pnl_state.read().await;
+            let bot = pnl_bot_state.read().await;
+            let is_running = bot.state() == BotState::Running;
+            drop(bot);
+            if !is_running {
+                continue;
+            }
+
+            let mut engine = pnl_state.write().await;
+            engine.roll_daily_context(chrono::Utc::now());
+
             let available = engine.balance().available;
-            // Mark-to-market value of all open positions at current mid-prices.
             let portfolio_value = engine.compute_portfolio_value();
-            // Realized P&L = cumulative cash flow from fills (buys cost, sells earn).
-            // Accumulated in daily_pnl by StateEngine::process_event on each fill.
-            let realized = engine.daily_pnl();
-            // Bug 18: unrealized = mark-to-market value of open positions.
-            // Together, realized + unrealized gives total equity change since session start.
-            let unrealized = portfolio_value;
+            let equity = available + portfolio_value;
+
+            let session_realized = engine.session_realized_pnl();
+            let session_unrealized = engine.session_unrealized_pnl();
+            let session_total = engine.session_total_pnl();
+
+            let daily_realized = engine.daily_realized_pnl();
+            let daily_unrealized = engine.daily_unrealized_pnl();
+            let daily_total = engine.daily_total_pnl();
+
+            let session_started_at = engine.session_started_at();
             let open_orders = engine.open_order_count() as i32;
             let active_markets = engine.active_market_count() as i32;
             drop(engine);
 
             let _ = db::insert_pnl_snapshot(
                 &pnl_pool,
-                realized,
-                unrealized,
+                session_realized,
+                session_unrealized,
                 available,
                 portfolio_value,
+                equity,
+                session_total,
+                daily_realized,
+                daily_unrealized,
+                daily_total,
+                session_started_at,
                 open_orders,
                 active_markets,
             )
             .await;
 
             let _ = pnl_broadcast.send(WsEvent::PnlTick {
-                realized_pnl: realized.to_string(),
-                unrealized_pnl: unrealized.to_string(),
+                realized_pnl: session_realized.to_string(),
+                unrealized_pnl: session_unrealized.to_string(),
                 balance: available.to_string(),
                 portfolio_value: portfolio_value.to_string(),
+                equity: equity.to_string(),
+                session_pnl: session_total.to_string(),
+                daily_pnl: daily_total.to_string(),
             });
         }
     });
@@ -158,7 +181,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn load_config_overrides(mut config: config::AppConfig, pool: &sqlx::PgPool) -> config::AppConfig {
+async fn load_config_overrides(
+    mut config: config::AppConfig,
+    pool: &sqlx::PgPool,
+) -> config::AppConfig {
     if let Ok(Some(val)) = db::get_config(pool, "strategy").await {
         if let Ok(s) = serde_json::from_value::<config::StrategyConfig>(val) {
             tracing::info!("Loaded strategy config override from DB");
@@ -360,9 +386,51 @@ async fn run_trading_loop(
         }
     }
 
+    // Initialize PnL baselines:
+    // - Session baseline starts from current equity at this bot start.
+    // - Daily realized is reconstructed from fills since UTC midnight.
+    // - Daily equity baseline uses the first snapshot seen today (if any), else current equity.
+    let now = chrono::Utc::now();
+    let day_start = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("valid midnight")
+        .and_utc();
+
+    let daily_realized = match db::sum_fill_cashflow_since(&db_pool, day_start).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to restore daily realized PnL from DB; defaulting to 0");
+            rust_decimal::Decimal::ZERO
+        }
+    };
+
+    let fallback_equity = {
+        let engine = state_engine.read().await;
+        engine.current_equity()
+    };
+
+    let daily_start_equity = match db::get_first_equity_snapshot_since(&db_pool, day_start).await {
+        Ok(Some(v)) => v,
+        Ok(None) => fallback_equity,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read day-start equity baseline from DB; using current equity");
+            fallback_equity
+        }
+    };
+
+    {
+        let mut engine = state_engine.write().await;
+        engine.initialize_pnl_context(now, daily_realized, daily_start_equity);
+    }
+
     {
         let mut bsm = bot_state.write().await;
-        if bsm.transition(BotState::Running, "reconciliation_complete", None).await.is_err() {
+        if bsm
+            .transition(BotState::Running, "reconciliation_complete", None)
+            .await
+            .is_err()
+        {
             return;
         }
     }
@@ -397,9 +465,8 @@ async fn run_trading_loop(
     let mut tick = tokio::time::interval(tick_interval);
 
     // Market rescan timer
-    let rescan_interval = tokio::time::Duration::from_secs(
-        cfg.trading.market_rescan_interval_mins as u64 * 60,
-    );
+    let rescan_interval =
+        tokio::time::Duration::from_secs(cfg.trading.market_rescan_interval_mins as u64 * 60);
     let mut rescan_tick = tokio::time::interval(rescan_interval);
     rescan_tick.tick().await; // consume the immediate first tick
 
@@ -419,6 +486,8 @@ async fn run_trading_loop(
     let mut market_failures: std::collections::HashMap<types::MarketTicker, u32> =
         std::collections::HashMap::new();
     const BLACKLIST_THRESHOLD: u32 = 3;
+    let mut disconnect_pause_logged = false;
+    let mut disconnect_cancel_attempted = false;
 
     tracing::info!(
         markets = target_markets.len(),
@@ -463,9 +532,27 @@ async fn run_trading_loop(
                         }
                     }
                     Some(ev) => {
+                        let is_disconnect = matches!(&ev, types::ExchangeEvent::Disconnected);
+                        let is_connect = matches!(&ev, types::ExchangeEvent::Connected);
+
                         broadcast_exchange_event(&ev, &event_broadcast);
                         let mut engine = state_engine.write().await;
                         engine.process_event(ev).await;
+                        drop(engine);
+
+                        if is_connect {
+                            disconnect_cancel_attempted = false;
+                            disconnect_pause_logged = false;
+                        }
+
+                        // Best-effort one-time cancel-all on disconnect edge.
+                        // This avoids repeated cancel spam while still reducing stale exposure.
+                        if is_disconnect && !disconnect_cancel_attempted {
+                            tracing::warn!("Exchange disconnected — issuing one-time best-effort cancel_all");
+                            let engine = state_engine.read().await;
+                            execution_engine.cancel_all(&engine).await;
+                            disconnect_cancel_attempted = true;
+                        }
                     }
                     None => {
                         tracing::error!("Event channel closed in trading loop — WS task exited");
@@ -624,6 +711,25 @@ async fn run_trading_loop(
                     break;
                 }
 
+                if engine.connectivity() == types::ConnectivityState::Disconnected {
+                    let elapsed_secs = engine
+                        .disconnected_for_secs(chrono::Utc::now())
+                        .unwrap_or_default();
+                    if !disconnect_pause_logged {
+                        tracing::warn!(
+                            elapsed_secs,
+                            timeout_secs = risk_engine.disconnect_timeout_secs(),
+                            "Exchange disconnected; pausing quote generation while reconnecting"
+                        );
+                        disconnect_pause_logged = true;
+                    }
+                    drop(engine);
+                    continue;
+                } else if disconnect_pause_logged {
+                    tracing::info!("Exchange reconnected; resuming quote generation");
+                    disconnect_pause_logged = false;
+                }
+
                 // Update event detector for all markets
                 let all_tickers: Vec<types::MarketTicker> = engine.books().keys().cloned().collect();
                 for ticker in &all_tickers {
@@ -684,7 +790,9 @@ async fn reconcile_startup(
     config: &config::AppConfig,
 ) -> Result<()> {
     tracing::info!("Step 1/4: Fetching account balance...");
-    let balance = rest_client.get_balance().await
+    let balance = rest_client
+        .get_balance()
+        .await
         .context("reconcile step 1: get_balance failed")?;
     tracing::info!(
         available = %balance.available,
@@ -696,7 +804,9 @@ async fn reconcile_startup(
     engine.set_balance(balance);
 
     tracing::info!("Step 2/4: Fetching open orders...");
-    let open_orders = rest_client.get_orders(Some("resting")).await
+    let open_orders = rest_client
+        .get_orders(Some("resting"))
+        .await
         .context("reconcile step 2: get_orders failed")?;
     tracing::info!(count = open_orders.len(), "Reconciled open orders");
     for order in &open_orders {
@@ -704,7 +814,9 @@ async fn reconcile_startup(
     }
 
     tracing::info!("Step 3/4: Fetching positions...");
-    let positions = rest_client.get_positions().await
+    let positions = rest_client
+        .get_positions()
+        .await
         .context("reconcile step 3: get_positions failed")?;
     tracing::info!(count = positions.len(), "Reconciled positions");
     for pos in positions {
@@ -726,7 +838,10 @@ async fn reconcile_startup(
         .unwrap_or_default();
 
     let market_data_map: std::collections::HashMap<&str, &exchange::models::MarketResponse> =
-        all_market_data.iter().map(|m| (m.ticker.as_str(), m)).collect();
+        all_market_data
+            .iter()
+            .map(|m| (m.ticker.as_str(), m))
+            .collect();
 
     for ticker in &selected_tickers {
         let mt = types::MarketTicker::from(ticker.as_str());
@@ -753,9 +868,7 @@ async fn reconcile_startup(
 }
 
 /// Convert a REST orderbook price-level list (Vec<[price, qty]>) to PriceLevel vec.
-fn orderbook_data_to_price_levels(
-    levels: &Option<Vec<Vec<String>>>,
-) -> Vec<types::PriceLevel> {
+fn orderbook_data_to_price_levels(levels: &Option<Vec<Vec<String>>>) -> Vec<types::PriceLevel> {
     use rust_decimal::Decimal;
     let Some(v) = levels else { return vec![] };
     v.iter()
@@ -893,7 +1006,9 @@ fn compute_target_quotes(
         if let Some(mut target) = target {
             let mult = event_detector.spread_multiplier(ticker);
             if mult > rust_decimal::Decimal::ONE {
-                if let (Some(ref mut bid), Some(ref mut ask)) = (&mut target.yes_bid, &mut target.yes_ask) {
+                if let (Some(ref mut bid), Some(ref mut ask)) =
+                    (&mut target.yes_bid, &mut target.yes_ask)
+                {
                     let mid = (bid.price + ask.price) / rust_decimal::Decimal::TWO;
                     let half = (ask.price - bid.price) / rust_decimal::Decimal::TWO;
                     let widened_half = half * mult;
@@ -912,7 +1027,10 @@ fn compute_target_quotes(
 
     // Build a fair-price lookup for the post-adjustment risk check
     let fv_by_ticker: std::collections::HashMap<&types::MarketTicker, rust_decimal::Decimal> =
-        pre_adjust.iter().map(|(q, fv)| (&q.market_ticker, *fv)).collect();
+        pre_adjust
+            .iter()
+            .map(|(q, fv)| (&q.market_ticker, *fv))
+            .collect();
 
     // Phase 3: run risk check on the final (cross-market-adjusted) quotes
     let mut quotes = Vec::new();

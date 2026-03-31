@@ -233,19 +233,35 @@ pub async fn insert_pnl_snapshot(
     unrealized_pnl: Decimal,
     balance: Decimal,
     portfolio_value: Decimal,
+    equity: Decimal,
+    session_pnl: Decimal,
+    daily_realized_pnl: Decimal,
+    daily_unrealized_pnl: Decimal,
+    daily_pnl: Decimal,
+    session_started_at: Option<chrono::DateTime<chrono::Utc>>,
     open_order_count: i32,
     active_market_count: i32,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO pnl_snapshots (ts, realized_pnl, unrealized_pnl, balance, portfolio_value, open_order_count, active_market_count)
-        VALUES (NOW(), $1, $2, $3, $4, $5, $6)
+        INSERT INTO pnl_snapshots (
+            ts, realized_pnl, unrealized_pnl, balance, portfolio_value,
+            equity, session_pnl, daily_realized_pnl, daily_unrealized_pnl, daily_pnl,
+            session_started_at, open_order_count, active_market_count
+        )
+        VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(realized_pnl)
     .bind(unrealized_pnl)
     .bind(balance)
     .bind(portfolio_value)
+    .bind(equity)
+    .bind(session_pnl)
+    .bind(daily_realized_pnl)
+    .bind(daily_unrealized_pnl)
+    .bind(daily_pnl)
+    .bind(session_started_at)
     .bind(open_order_count)
     .bind(active_market_count)
     .execute(pool)
@@ -261,43 +277,166 @@ pub struct PnlSnapshotRow {
     pub unrealized_pnl: Decimal,
     pub balance: Decimal,
     pub portfolio_value: Decimal,
+    pub equity: Decimal,
+    pub session_pnl: Decimal,
+    pub daily_realized_pnl: Decimal,
+    pub daily_unrealized_pnl: Decimal,
+    pub daily_pnl: Decimal,
+    pub session_started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub open_order_count: i32,
     pub active_market_count: i32,
 }
 
-pub async fn get_pnl_snapshots(pool: &PgPool, limit: i64) -> Result<Vec<PnlSnapshotRow>> {
+pub async fn get_pnl_snapshots(
+    pool: &PgPool,
+    limit: i64,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Vec<PnlSnapshotRow>> {
     let rows: Vec<(
         chrono::DateTime<chrono::Utc>,
         Decimal,
         Decimal,
         Decimal,
         Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Option<chrono::DateTime<chrono::Utc>>,
         i32,
         i32,
-    )> = sqlx::query_as(
-        "SELECT ts, realized_pnl, unrealized_pnl, balance, portfolio_value, open_order_count, active_market_count FROM pnl_snapshots ORDER BY ts DESC LIMIT $1",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .context("Failed to read pnl_snapshots")?;
+    )> = if let Some(since_ts) = since {
+        sqlx::query_as(
+            r#"
+            SELECT
+                ts, realized_pnl, unrealized_pnl, balance, portfolio_value,
+                COALESCE(NULLIF(equity, 0), balance + portfolio_value),
+                CASE
+                    WHEN session_pnl = 0 AND session_started_at IS NULL
+                        THEN realized_pnl + unrealized_pnl
+                    ELSE session_pnl
+                END,
+                daily_realized_pnl, daily_unrealized_pnl, daily_pnl,
+                session_started_at, open_order_count, active_market_count
+            FROM pnl_snapshots
+            WHERE ts >= $1
+            ORDER BY ts DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(since_ts)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("Failed to read pnl_snapshots with since filter")?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT
+                ts, realized_pnl, unrealized_pnl, balance, portfolio_value,
+                COALESCE(NULLIF(equity, 0), balance + portfolio_value),
+                CASE
+                    WHEN session_pnl = 0 AND session_started_at IS NULL
+                        THEN realized_pnl + unrealized_pnl
+                    ELSE session_pnl
+                END,
+                daily_realized_pnl, daily_unrealized_pnl, daily_pnl,
+                session_started_at, open_order_count, active_market_count
+            FROM pnl_snapshots
+            ORDER BY ts DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("Failed to read pnl_snapshots")?
+    };
 
     Ok(rows
         .into_iter()
         .map(
-            |(ts, realized_pnl, unrealized_pnl, balance, portfolio_value, open_order_count, active_market_count)| {
+            |(
+                ts,
+                realized_pnl,
+                unrealized_pnl,
+                balance,
+                portfolio_value,
+                equity,
+                session_pnl,
+                daily_realized_pnl,
+                daily_unrealized_pnl,
+                daily_pnl,
+                session_started_at,
+                open_order_count,
+                active_market_count,
+            )| {
                 PnlSnapshotRow {
                     ts,
                     realized_pnl,
                     unrealized_pnl,
                     balance,
                     portfolio_value,
+                    equity,
+                    session_pnl,
+                    daily_realized_pnl,
+                    daily_unrealized_pnl,
+                    daily_pnl,
+                    session_started_at,
                     open_order_count,
                     active_market_count,
                 }
             },
         )
         .collect())
+}
+
+pub async fn sum_fill_cashflow_since(
+    pool: &PgPool,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Result<Decimal> {
+    let row: (Option<Decimal>,) = sqlx::query_as(
+        r#"
+        SELECT
+            SUM(
+                CASE
+                    WHEN action = 'buy' THEN -(price * quantity) - fee
+                    WHEN action = 'sell' THEN (price * quantity) - fee
+                    ELSE 0
+                END
+            )
+        FROM fills
+        WHERE fill_ts >= $1
+        "#,
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await
+    .context("Failed to sum fill cashflow since timestamp")?;
+
+    Ok(row.0.unwrap_or(Decimal::ZERO))
+}
+
+pub async fn get_first_equity_snapshot_since(
+    pool: &PgPool,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<Decimal>> {
+    let row: Option<(Decimal,)> = sqlx::query_as(
+        r#"
+        SELECT COALESCE(NULLIF(equity, 0), balance + portfolio_value)
+        FROM pnl_snapshots
+        WHERE ts >= $1
+        ORDER BY ts ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(since)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to read first equity snapshot since timestamp")?;
+
+    Ok(row.map(|r| r.0))
 }
 
 // ── Recent fills from DB ──
@@ -339,7 +478,18 @@ pub async fn get_recent_fills(pool: &PgPool, limit: i64) -> Result<Vec<FillRow>>
     Ok(rows
         .into_iter()
         .map(
-            |(fill_id, order_id, market_ticker, side, action, price, quantity, fee, is_taker, fill_ts)| {
+            |(
+                fill_id,
+                order_id,
+                market_ticker,
+                side,
+                action,
+                price,
+                quantity,
+                fee,
+                is_taker,
+                fill_ts,
+            )| {
                 FillRow {
                     fill_id,
                     order_id,
@@ -371,8 +521,21 @@ pub struct OrderRow {
     pub created_ts: chrono::DateTime<chrono::Utc>,
 }
 
-pub async fn get_recent_orders(pool: &PgPool, status: Option<&str>, limit: i64) -> Result<Vec<OrderRow>> {
-    let rows: Vec<(String, String, String, String, Decimal, Decimal, String, chrono::DateTime<chrono::Utc>)> = if let Some(st) = status {
+pub async fn get_recent_orders(
+    pool: &PgPool,
+    status: Option<&str>,
+    limit: i64,
+) -> Result<Vec<OrderRow>> {
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        Decimal,
+        Decimal,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    )> = if let Some(st) = status {
         sqlx::query_as(
             "SELECT order_id, market_ticker, side, action, price, quantity, status, created_ts FROM orders WHERE status = $1 ORDER BY updated_ts DESC LIMIT $2",
         )
@@ -439,14 +602,16 @@ pub async fn get_risk_events(pool: &PgPool, limit: i64, offset: i64) -> Result<V
 
     Ok(rows
         .into_iter()
-        .map(|(ts, severity, component, market_ticker, message, payload)| RiskEventRow {
-            ts,
-            severity,
-            component,
-            market_ticker,
-            message,
-            payload,
-        })
+        .map(
+            |(ts, severity, component, market_ticker, message, payload)| RiskEventRow {
+                ts,
+                severity,
+                component,
+                market_ticker,
+                message,
+                payload,
+            },
+        )
         .collect())
 }
 
@@ -477,12 +642,14 @@ pub async fn get_strategy_decisions(
 
     Ok(rows
         .into_iter()
-        .map(|(ts, market_ticker, fair_value, inventory, reason)| StrategyDecisionRow {
-            ts,
-            market_ticker,
-            fair_value,
-            inventory,
-            reason,
-        })
+        .map(
+            |(ts, market_ticker, fair_value, inventory, reason)| StrategyDecisionRow {
+                ts,
+                market_ticker,
+                fair_value,
+                inventory,
+                reason,
+            },
+        )
         .collect())
 }

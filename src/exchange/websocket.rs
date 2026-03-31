@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
 
@@ -64,11 +64,19 @@ async fn connect_and_stream(
         .header("KALSHI-ACCESS-KEY", &headers.api_key)
         .header("KALSHI-ACCESS-TIMESTAMP", &headers.timestamp)
         .header("KALSHI-ACCESS-SIGNATURE", &headers.signature)
-        .header("Host", url::Url::parse(ws_url).map(|u| u.host_str().unwrap_or("").to_string()).unwrap_or_default())
+        .header(
+            "Host",
+            url::Url::parse(ws_url)
+                .map(|u| u.host_str().unwrap_or("").to_string())
+                .unwrap_or_default(),
+        )
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Key", tungstenite::handshake::client::generate_key())
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
         .body(())
         .context("Failed to build WS request")?;
 
@@ -89,10 +97,7 @@ async fn connect_and_stream(
         id: cmd_id,
         cmd: "subscribe".to_string(),
         params: WsSubscribeParams {
-            channels: vec![
-                "orderbook_delta".to_string(),
-                "trade".to_string(),
-            ],
+            channels: vec!["orderbook_delta".to_string(), "trade".to_string()],
             market_tickers: if market_tickers.is_empty() {
                 None
             } else {
@@ -186,8 +191,7 @@ async fn handle_ws_message(
     event_tx: &mpsc::Sender<ExchangeEvent>,
     seq_tracker: &mut HashMap<u64, u64>,
 ) -> Result<()> {
-    let ws_msg: WsMessage =
-        serde_json::from_str(text).context("Failed to parse WS message")?;
+    let ws_msg: WsMessage = serde_json::from_str(text).context("Failed to parse WS message")?;
 
     // Track sequence numbers and trigger book resync on gaps (Bug 4)
     if let (Some(sid), Some(seq)) = (ws_msg.sid, ws_msg.seq) {
@@ -285,15 +289,14 @@ async fn handle_ws_message(
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<Decimal>().ok())
                     .or_else(|| {
-                        msg.get("yes_price")
-                            .and_then(|v| {
-                                if let Some(s) = v.as_str() {
-                                    s.parse::<Decimal>().ok()
-                                } else {
-                                    // Integer field is in cents
-                                    v.as_i64().map(|n| Decimal::new(n, 2))
-                                }
-                            })
+                        msg.get("yes_price").and_then(|v| {
+                            if let Some(s) = v.as_str() {
+                                s.parse::<Decimal>().ok()
+                            } else {
+                                // Integer field is in cents
+                                v.as_i64().map(|n| Decimal::new(n, 2))
+                            }
+                        })
                     })
                     .unwrap_or_default();
                 let count = msg

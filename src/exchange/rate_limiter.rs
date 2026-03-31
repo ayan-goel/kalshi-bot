@@ -56,7 +56,11 @@ impl RateLimiter {
         // Without this, a cost > max_tokens would spin forever.
         let cost = {
             let inner = self.inner.lock().await;
-            let max = if is_read { inner.max_read } else { inner.max_write };
+            let max = if is_read {
+                inner.max_read
+            } else {
+                inner.max_write
+            };
             cost.min(max)
         };
 

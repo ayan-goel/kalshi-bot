@@ -17,10 +17,12 @@ mod risk {
         max_total_reserved: Decimal,
         max_open_orders: u32,
         cancel_all_on_disconnect: bool,
+        disconnect_timeout_secs: i64,
     }
 
     struct MockState {
         connectivity: ConnectivityState,
+        disconnected_for_secs: i64,
         daily_pnl: Decimal,
         total_reserved: Decimal,
         open_order_count: usize,
@@ -37,6 +39,7 @@ mod risk {
         fn kill_switch_check(&self, state: &MockState) -> Option<String> {
             if self.cancel_all_on_disconnect
                 && state.connectivity == ConnectivityState::Disconnected
+                && state.disconnected_for_secs >= self.disconnect_timeout_secs
             {
                 return Some("Exchange disconnected".to_string());
             }
@@ -49,12 +52,7 @@ mod risk {
             None
         }
 
-        fn approve_order(
-            &self,
-            state: &MockState,
-            _price: Decimal,
-            _qty: Decimal,
-        ) -> RiskDecision {
+        fn approve_order(&self, state: &MockState, _price: Decimal, _qty: Decimal) -> RiskDecision {
             if state.open_order_count >= self.max_open_orders as usize {
                 return RiskDecision::Rejected("Open order limit".to_string());
             }
@@ -72,12 +70,14 @@ mod risk {
             max_total_reserved: dec!(4000),
             max_open_orders: 500,
             cancel_all_on_disconnect: true,
+            disconnect_timeout_secs: 30,
         }
     }
 
     fn default_state() -> MockState {
         MockState {
             connectivity: ConnectivityState::Connected,
+            disconnected_for_secs: 0,
             daily_pnl: Decimal::ZERO,
             total_reserved: dec!(100),
             open_order_count: 10,
@@ -97,7 +97,17 @@ mod risk {
         let engine = default_engine();
         let mut state = default_state();
         state.connectivity = ConnectivityState::Disconnected;
+        state.disconnected_for_secs = 31;
         assert!(engine.kill_switch_check(&state).is_some());
+    }
+
+    #[test]
+    fn test_disconnect_within_grace_does_not_kill() {
+        let engine = default_engine();
+        let mut state = default_state();
+        state.connectivity = ConnectivityState::Disconnected;
+        state.disconnected_for_secs = 10;
+        assert!(engine.kill_switch_check(&state).is_none());
     }
 
     #[test]

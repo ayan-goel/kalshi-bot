@@ -17,6 +17,7 @@ import type {
   StrategyConfig,
   RiskConfig,
   TradingConfig,
+  PnlWindow,
 } from "./types";
 
 const BOT_API_URL =
@@ -68,7 +69,8 @@ export function getWsUrl(): string {
 export const api = {
   getStatus: () => apiFetch<BotStatus>("/api/status"),
   getBalance: () => apiFetch<BalanceInfo>("/api/balance"),
-  getPnl: () => apiFetch<PnlData>("/api/pnl"),
+  getPnl: (window: PnlWindow = "all") =>
+    apiFetch<PnlData>(`/api/pnl?window=${window}`),
   getMarkets: () => apiFetch<MarketSummary[]>("/api/markets"),
   getMarketDetail: (ticker: string) =>
     apiFetch<MarketDetail>(`/api/markets/${ticker}`),

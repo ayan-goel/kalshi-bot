@@ -86,8 +86,7 @@ impl OrderBook {
 
     /// Implied yes ask = 1.00 - best_no_bid. This is the cheapest offer to sell YES.
     pub fn implied_yes_ask(&self) -> Option<Decimal> {
-        self.best_no_bid()
-            .map(|nb| Decimal::ONE - nb.price)
+        self.best_no_bid().map(|nb| Decimal::ONE - nb.price)
     }
 
     /// Mid price: average of best yes bid and implied yes ask.
@@ -119,9 +118,7 @@ impl OrderBook {
             return self.mid();
         }
 
-        Some(
-            (yes_bid.price * no_bid.quantity + ask_price * yes_bid.quantity) / total_qty,
-        )
+        Some((yes_bid.price * no_bid.quantity + ask_price * yes_bid.quantity) / total_qty)
     }
 
     /// Order imbalance at top of book: (bid_qty - ask_qty) / (bid_qty + ask_qty).

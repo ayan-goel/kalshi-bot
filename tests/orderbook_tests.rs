@@ -2,8 +2,14 @@ use kalshi_bot::orderbook::OrderBook;
 use kalshi_bot::types::{PriceLevel, Side};
 use rust_decimal_macros::dec;
 
-fn pl(price: impl Into<rust_decimal::Decimal>, qty: impl Into<rust_decimal::Decimal>) -> PriceLevel {
-    PriceLevel { price: price.into(), quantity: qty.into() }
+fn pl(
+    price: impl Into<rust_decimal::Decimal>,
+    qty: impl Into<rust_decimal::Decimal>,
+) -> PriceLevel {
+    PriceLevel {
+        price: price.into(),
+        quantity: qty.into(),
+    }
 }
 
 #[test]
@@ -180,10 +186,7 @@ fn test_snapshot_replaces_previous() {
 fn test_zero_quantity_ignored_in_snapshot() {
     let mut book = OrderBook::new();
     book.apply_snapshot(
-        vec![
-            pl(dec!(0.40), dec!(0)),
-            pl(dec!(0.42), dec!(50)),
-        ],
+        vec![pl(dec!(0.40), dec!(0)), pl(dec!(0.42), dec!(50))],
         vec![],
         1,
     );

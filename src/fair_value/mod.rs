@@ -54,9 +54,7 @@ impl FairValueEngine {
         let imbalance_adj = self.order_imbalance_alpha * imbalance;
         let trade_sign_adj = self.trade_sign_alpha * trade_sign;
 
-        let inventory = position
-            .map(|p| p.net_inventory())
-            .unwrap_or(Decimal::ZERO);
+        let inventory = position.map(|p| p.net_inventory()).unwrap_or(Decimal::ZERO);
 
         let inv_adj = -self.inventory_penalty_k1 * inventory
             - self.inventory_penalty_k3 * inventory * inventory * inventory;
@@ -103,9 +101,7 @@ impl FairValueEngine {
 
         // Volume factor: higher volume = more reliable signal
         let volume_factor = match meta {
-            Some(m) if m.volume_24h > 0.0 => {
-                ((1.0 + m.volume_24h).ln() / 8.0).min(1.0)
-            }
+            Some(m) if m.volume_24h > 0.0 => ((1.0 + m.volume_24h).ln() / 8.0).min(1.0),
             _ => 0.5,
         };
 

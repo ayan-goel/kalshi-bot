@@ -127,9 +127,7 @@ where
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
 
-        let message = visitor
-            .message
-            .unwrap_or_else(|| md.name().to_string());
+        let message = visitor.message.unwrap_or_else(|| md.name().to_string());
 
         self.buffer
             .push(md.level().as_str(), md.target(), message, visitor.fields);

@@ -41,8 +41,14 @@ fn make_ticker() -> MarketTicker {
 fn make_book(bid_price: Decimal, no_bid_price: Decimal, qty: Decimal) -> OrderBook {
     let mut book = OrderBook::new();
     book.apply_snapshot(
-        vec![PriceLevel { price: bid_price, quantity: qty }],
-        vec![PriceLevel { price: no_bid_price, quantity: qty }],
+        vec![PriceLevel {
+            price: bid_price,
+            quantity: qty,
+        }],
+        vec![PriceLevel {
+            price: no_bid_price,
+            quantity: qty,
+        }],
         1,
     );
     book
@@ -138,19 +144,30 @@ fn test_fair_value_positive_imbalance_increases_price() {
     // More bid qty than ask qty → positive imbalance → fair up
     let mut book = OrderBook::new();
     book.apply_snapshot(
-        vec![PriceLevel { price: dec!(0.45), quantity: dec!(300) }],
-        vec![PriceLevel { price: dec!(0.45), quantity: dec!(100) }],
+        vec![PriceLevel {
+            price: dec!(0.45),
+            quantity: dec!(300),
+        }],
+        vec![PriceLevel {
+            price: dec!(0.45),
+            quantity: dec!(100),
+        }],
         1,
     );
     let fv_engine = engine();
     let fv_balanced = {
         let b = midpoint_book();
-        fv_engine.compute(&make_ticker(), &b, None, Decimal::ZERO, None).unwrap()
+        fv_engine
+            .compute(&make_ticker(), &b, None, Decimal::ZERO, None)
+            .unwrap()
     };
     let fv_imbal = fv_engine
         .compute(&make_ticker(), &book, None, Decimal::ZERO, None)
         .unwrap();
-    assert!(fv_imbal.price > fv_balanced.price, "imbalanced fair {fv_imbal:?} should be higher");
+    assert!(
+        fv_imbal.price > fv_balanced.price,
+        "imbalanced fair {fv_imbal:?} should be higher"
+    );
 }
 
 #[test]
@@ -194,8 +211,12 @@ fn test_fair_value_clamp_low() {
 #[test]
 fn test_fair_value_deterministic() {
     let book = midpoint_book();
-    let fv1 = engine().compute(&make_ticker(), &book, None, dec!(0.5), None).unwrap();
-    let fv2 = engine().compute(&make_ticker(), &book, None, dec!(0.5), None).unwrap();
+    let fv1 = engine()
+        .compute(&make_ticker(), &book, None, dec!(0.5), None)
+        .unwrap();
+    let fv2 = engine()
+        .compute(&make_ticker(), &book, None, dec!(0.5), None)
+        .unwrap();
     assert_eq!(fv1.price, fv2.price);
     // Confidences are based on current time (staleness), so may differ by tiny amounts;
     // check they are within a reasonable range

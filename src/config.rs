@@ -57,9 +57,15 @@ pub struct TradingConfig {
     pub market_score_weights: MarketScoreWeights,
 }
 
-fn default_rescan_interval() -> u32 { 15 }
-fn default_min_expiry_hours() -> f64 { 2.0 }
-fn default_max_expiry_hours() -> f64 { 168.0 }
+fn default_rescan_interval() -> u32 {
+    15
+}
+fn default_min_expiry_hours() -> f64 {
+    2.0
+}
+fn default_max_expiry_hours() -> f64 {
+    168.0
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MarketScoreWeights {
@@ -77,12 +83,24 @@ pub struct MarketScoreWeights {
     pub price_centrality: f64,
 }
 
-fn default_w_volume() -> f64 { 0.25 }
-fn default_w_spread() -> f64 { 0.20 }
-fn default_w_oi() -> f64 { 0.15 }
-fn default_w_expiry() -> f64 { 0.15 }
-fn default_w_edge() -> f64 { 0.15 }
-fn default_w_price() -> f64 { 0.10 }
+fn default_w_volume() -> f64 {
+    0.25
+}
+fn default_w_spread() -> f64 {
+    0.20
+}
+fn default_w_oi() -> f64 {
+    0.15
+}
+fn default_w_expiry() -> f64 {
+    0.15
+}
+fn default_w_edge() -> f64 {
+    0.15
+}
+fn default_w_price() -> f64 {
+    0.10
+}
 
 impl Default for MarketScoreWeights {
     fn default() -> Self {
@@ -130,14 +148,30 @@ pub struct StrategyConfig {
     pub event_decay_seconds: u64,
 }
 
-fn default_inv_spread_scale() -> Decimal { Decimal::new(1, 1) }      // 0.1
-fn default_inv_skew_scale() -> Decimal { Decimal::new(1, 2) }        // 0.01
-fn default_vol_baseline_spread() -> Decimal { Decimal::new(2, 2) }   // 0.02
-fn default_expiry_widen_coeff() -> Decimal { Decimal::new(1, 2) }    // 0.01
-fn default_expiry_widen_threshold_hours() -> f64 { 4.0 }
-fn default_event_half_spread_mult() -> Decimal { Decimal::new(3, 0) } // 3x
-fn default_event_threshold() -> Decimal { Decimal::new(5, 2) }        // 0.05
-fn default_event_decay_secs() -> u64 { 30 }
+fn default_inv_spread_scale() -> Decimal {
+    Decimal::new(1, 1)
+} // 0.1
+fn default_inv_skew_scale() -> Decimal {
+    Decimal::new(1, 2)
+} // 0.01
+fn default_vol_baseline_spread() -> Decimal {
+    Decimal::new(2, 2)
+} // 0.02
+fn default_expiry_widen_coeff() -> Decimal {
+    Decimal::new(1, 2)
+} // 0.01
+fn default_expiry_widen_threshold_hours() -> f64 {
+    4.0
+}
+fn default_event_half_spread_mult() -> Decimal {
+    Decimal::new(3, 0)
+} // 3x
+fn default_event_threshold() -> Decimal {
+    Decimal::new(5, 2)
+} // 0.05
+fn default_event_decay_secs() -> u64 {
+    30
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RiskConfig {
@@ -163,9 +197,15 @@ pub struct RiskConfig {
     pub max_fair_deviation: Decimal,
 }
 
-fn default_max_capital_per_market() -> Decimal { Decimal::new(1000, 2) } // $10
-fn default_max_portfolio_utilization() -> Decimal { Decimal::new(50, 2) } // 0.50
-fn default_max_fair_deviation() -> Decimal { Decimal::new(10, 2) }       // 0.10
+fn default_max_capital_per_market() -> Decimal {
+    Decimal::new(1000, 2)
+} // $10
+fn default_max_portfolio_utilization() -> Decimal {
+    Decimal::new(50, 2)
+} // 0.50
+fn default_max_fair_deviation() -> Decimal {
+    Decimal::new(10, 2)
+} // 0.10
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {

@@ -29,7 +29,11 @@ impl MidHistory {
 
     fn velocity_5s(&self, now: Instant) -> Option<Decimal> {
         let cutoff = now - std::time::Duration::from_secs(5);
-        let recent: Vec<_> = self.snapshots.iter().filter(|(t, _)| *t >= cutoff).collect();
+        let recent: Vec<_> = self
+            .snapshots
+            .iter()
+            .filter(|(t, _)| *t >= cutoff)
+            .collect();
         if recent.len() < 2 {
             return None;
         }
@@ -79,7 +83,8 @@ impl EventDetector {
             None => return,
         };
 
-        let history = self.mid_history
+        let history = self
+            .mid_history
             .entry(ticker.clone())
             .or_insert_with(MidHistory::new);
         history.push(now, mid);
@@ -88,7 +93,8 @@ impl EventDetector {
 
         if let Some(vel) = velocity {
             if vel >= self.event_threshold {
-                let state = self.event_states
+                let state = self
+                    .event_states
                     .entry(ticker.clone())
                     .or_insert(EventState {
                         active: false,
@@ -132,7 +138,8 @@ impl EventDetector {
                     let elapsed = triggered.elapsed().as_secs_f64();
                     let total = self.event_decay_seconds as f64;
                     let progress = (elapsed / total).min(1.0);
-                    let mult_f = self.event_half_spread_multiplier
+                    let mult_f = self
+                        .event_half_spread_multiplier
                         .to_string()
                         .parse::<f64>()
                         .unwrap_or(3.0);

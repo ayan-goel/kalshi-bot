@@ -39,11 +39,7 @@ pub enum BotCommand {
 }
 
 async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
-    let secret = req
-        .extensions()
-        .get::<Option<String>>()
-        .cloned()
-        .flatten();
+    let secret = req.extensions().get::<Option<String>>().cloned().flatten();
 
     if let Some(expected) = secret {
         let auth_header = req
@@ -58,10 +54,7 @@ async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCod
         let query_token = req
             .uri()
             .query()
-            .and_then(|q| {
-                q.split('&')
-                    .find_map(|pair| pair.strip_prefix("token="))
-            })
+            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
             .unwrap_or("");
 
         if token != expected && query_token != expected {
@@ -79,8 +72,7 @@ pub fn create_router(app_state: AppState) -> axum::Router {
     let secret = app_state.api_secret.clone();
 
     // Health endpoint is outside auth — Railway needs it for health checks
-    let health_route = axum::Router::new()
-        .route("/api/health", get(routes::health));
+    let health_route = axum::Router::new().route("/api/health", get(routes::health));
 
     let protected_routes = axum::Router::new()
         .route("/api/status", get(routes::status))
@@ -101,17 +93,22 @@ pub fn create_router(app_state: AppState) -> axum::Router {
         .route("/api/pnl", get(routes::get_pnl))
         .route("/api/fills", get(routes::get_fills))
         .route("/api/risk-events", get(routes::get_risk_events))
-        .route("/api/strategy-decisions", get(routes::get_strategy_decisions))
+        .route(
+            "/api/strategy-decisions",
+            get(routes::get_strategy_decisions),
+        )
         .route("/api/raw-logs", get(routes::get_raw_logs))
         .route("/api/ws", get(ws::ws_handler))
-        .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
-            let s = secret.clone();
-            async move {
-                let mut req = req;
-                req.extensions_mut().insert(s);
-                auth_middleware(req, next).await
-            }
-        }));
+        .layer(axum::middleware::from_fn(
+            move |req: Request, next: Next| {
+                let s = secret.clone();
+                async move {
+                    let mut req = req;
+                    req.extensions_mut().insert(s);
+                    auth_middleware(req, next).await
+                }
+            },
+        ));
 
     health_route
         .merge(protected_routes)

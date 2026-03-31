@@ -6,7 +6,7 @@ use crate::config::AppConfig;
 use crate::exchange::auth::KalshiAuth;
 use crate::exchange::models::*;
 use crate::exchange::rate_limiter::RateLimiter;
-use crate::types::{Balance, Position, MarketTicker};
+use crate::types::{Balance, MarketTicker, Position};
 
 #[derive(Clone, Debug)]
 pub struct KalshiRestClient {
@@ -205,7 +205,9 @@ impl KalshiRestClient {
     #[instrument(skip(self))]
     pub async fn cancel_order(&self, order_id: &str) -> Result<OrderResponse> {
         debug!(order_id = %order_id, "Cancelling order");
-        let resp = self.delete(&format!("/portfolio/orders/{order_id}")).await?;
+        let resp = self
+            .delete(&format!("/portfolio/orders/{order_id}"))
+            .await?;
         let data: CancelOrderResponse = resp.json().await?;
         Ok(data.order)
     }
@@ -322,7 +324,8 @@ impl KalshiRestClient {
     /// Fetch markets for a specific event (siblings).
     #[instrument(skip(self))]
     pub async fn get_markets_for_event(&self, event_ticker: &str) -> Result<Vec<MarketResponse>> {
-        self.get_all_markets(Some("open"), Some(event_ticker), None).await
+        self.get_all_markets(Some("open"), Some(event_ticker), None)
+            .await
     }
 
     /// Fetch events with optional nested markets.

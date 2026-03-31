@@ -29,11 +29,7 @@ impl CrossMarketChecker {
 
     /// Adjust target quotes for cross-market consistency.
     /// Returns the quotes with any needed adjustments applied.
-    pub fn adjust_quotes(
-        &self,
-        quotes: Vec<TargetQuote>,
-        state: &StateEngine,
-    ) -> Vec<TargetQuote> {
+    pub fn adjust_quotes(&self, quotes: Vec<TargetQuote>, state: &StateEngine) -> Vec<TargetQuote> {
         // Group quotes by event_ticker
         let mut event_groups: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, q) in quotes.iter().enumerate() {

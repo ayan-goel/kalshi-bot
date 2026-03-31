@@ -9,6 +9,7 @@ import {
   DollarSign,
   Layers,
   TrendingUp,
+  CalendarDays,
   ShoppingCart,
   BarChart3,
   Lock,
@@ -26,15 +27,13 @@ export default function DashboardPage() {
   const available = balance ? parseFloat(balance.available) : 0;
   const portfolioValue = balance ? parseFloat(balance.portfolio_value) : 0;
 
-  // Latest snapshot for realtime PnL data
-  const latestSnap = pnl?.snapshots?.[0];
+  const sessionPnl = pnl ? parseFloat(pnl.session.pnl) : 0;
+  const sessionRealized = pnl ? parseFloat(pnl.session.realized_pnl) : 0;
+  const sessionUnrealized = pnl ? parseFloat(pnl.session.unrealized_pnl) : 0;
 
-  // Session PnL = today's fill cash flow (realized) + current position mark (unrealized).
-  // daily_realized_pnl tracks cumulative cash in/out from fills since midnight.
-  // unrealized_pnl is the mark-to-market of open positions at the latest snapshot.
-  const realizedPnl = pnl ? parseFloat(pnl.daily_realized_pnl) : 0;
-  const unrealizedPnl = latestSnap ? parseFloat(latestSnap.unrealized_pnl) : 0;
-  const sessionPnl = realizedPnl + unrealizedPnl;
+  const dailyPnl = pnl ? parseFloat(pnl.daily.pnl) : 0;
+  const dailyRealized = pnl ? parseFloat(pnl.daily.realized_pnl) : 0;
+  const dailyUnrealized = pnl ? parseFloat(pnl.daily.unrealized_pnl) : 0;
 
   const fmt = (v: number) => `$${v.toFixed(2)}`;
   const sign = (v: number) => (v >= 0 ? "+" : "");
@@ -55,8 +54,8 @@ export default function DashboardPage() {
 
       <EnvSwitcher />
 
-      {/* Row 1: Cash | Position Value | Session PnL | Open Orders */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      {/* Row 1: Cash | Position Value | Session PnL | Daily PnL | Open Orders */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
         <StatCard
           label="Cash"
           value={balance ? fmt(available) : "—"}
@@ -78,13 +77,26 @@ export default function DashboardPage() {
           value={pnl ? `${sign(sessionPnl)}${fmt(sessionPnl)}` : "—"}
           subValue={
             pnl
-              ? `${sign(realizedPnl)}${fmt(realizedPnl)} realized · ${sign(unrealizedPnl)}${fmt(unrealizedPnl)} unrealized`
+              ? `${sign(sessionRealized)}${fmt(sessionRealized)} realized · ${sign(sessionUnrealized)}${fmt(sessionUnrealized)} unrealized`
               : undefined
           }
           icon={TrendingUp}
           iconColor={sessionPnl >= 0 ? "text-emerald-400" : "text-red-400"}
           iconBg={sessionPnl >= 0 ? "bg-emerald-400/10" : "bg-red-400/10"}
           valueColor={sessionPnl >= 0 ? "text-emerald-400" : "text-red-400"}
+        />
+        <StatCard
+          label="Daily PnL"
+          value={pnl ? `${sign(dailyPnl)}${fmt(dailyPnl)}` : "—"}
+          subValue={
+            pnl
+              ? `${sign(dailyRealized)}${fmt(dailyRealized)} realized · ${sign(dailyUnrealized)}${fmt(dailyUnrealized)} unrealized`
+              : undefined
+          }
+          icon={CalendarDays}
+          iconColor={dailyPnl >= 0 ? "text-emerald-400" : "text-red-400"}
+          iconBg={dailyPnl >= 0 ? "bg-emerald-400/10" : "bg-red-400/10"}
+          valueColor={dailyPnl >= 0 ? "text-emerald-400" : "text-red-400"}
         />
         <StatCard
           label="Open Orders"

@@ -46,7 +46,9 @@ impl MarketScanner {
     /// Scan all open markets and return scored, ranked results.
     pub async fn scan(&self, rest_client: &KalshiRestClient) -> Result<Vec<ScoredMarket>> {
         info!("Scanning all open markets...");
-        let markets = rest_client.get_all_markets(Some("open"), None, None).await?;
+        let markets = rest_client
+            .get_all_markets(Some("open"), None, None)
+            .await?;
         info!(count = markets.len(), "Fetched open markets for scoring");
 
         let now = Utc::now();
@@ -55,7 +57,11 @@ impl MarketScanner {
             .map(|m| self.score_market(&m, &now))
             .collect();
 
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let accepted = scored.iter().filter(|s| s.reject_reason.is_none()).count();
         info!(
@@ -115,7 +121,12 @@ impl MarketScanner {
             max = max_markets,
             "Selected top markets by score"
         );
-        for (i, s) in all_scored.iter().filter(|s| s.reject_reason.is_none()).take(max_markets).enumerate() {
+        for (i, s) in all_scored
+            .iter()
+            .filter(|s| s.reject_reason.is_none())
+            .take(max_markets)
+            .enumerate()
+        {
             debug!(
                 rank = i + 1,
                 ticker = %s.ticker,
@@ -140,7 +151,11 @@ impl MarketScanner {
         let open_interest = parse_fp(&market.open_interest_fp);
         let yes_bid = parse_fp(&market.yes_bid_dollars);
         let yes_ask = parse_fp(&market.yes_ask_dollars);
-        let spread = if yes_ask > 0.0 && yes_bid > 0.0 { yes_ask - yes_bid } else { 1.0 };
+        let spread = if yes_ask > 0.0 && yes_bid > 0.0 {
+            yes_ask - yes_bid
+        } else {
+            1.0
+        };
         let mid_price = if yes_ask > 0.0 && yes_bid > 0.0 {
             (yes_bid + yes_ask) / 2.0
         } else {
@@ -225,7 +240,11 @@ impl MarketScanner {
 
         if !self.categories_allowlist.is_empty() {
             let cat = market.category.as_deref().unwrap_or("");
-            if !self.categories_allowlist.iter().any(|c| c.eq_ignore_ascii_case(cat)) {
+            if !self
+                .categories_allowlist
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(cat))
+            {
                 return Some(format!("category '{cat}' not in allowlist"));
             }
         }

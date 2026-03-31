@@ -15,7 +15,27 @@ export interface BalanceInfo {
   total_reserved: string;
 }
 
+export type PnlWindow = "30m" | "1h" | "4h" | "1d" | "all";
+
+export interface PnlBreakdown {
+  pnl: string;
+  realized_pnl: string;
+  unrealized_pnl: string;
+}
+
+export interface PnlComponents {
+  cash: string;
+  position_value: string;
+  equity: string;
+}
+
 export interface PnlData {
+  window: string;
+  session_started_at: string | null;
+  session: PnlBreakdown;
+  daily: PnlBreakdown;
+  components: PnlComponents;
+  // compatibility field from backend
   daily_realized_pnl: string;
   snapshots: PnlSnapshot[];
 }
@@ -26,6 +46,13 @@ export interface PnlSnapshot {
   unrealized_pnl: string;
   balance: string;
   portfolio_value: string;
+  equity: string;
+  session_pnl: string;
+  session_realized_pnl: string;
+  session_unrealized_pnl: string;
+  daily_pnl: string;
+  daily_realized_pnl: string;
+  daily_unrealized_pnl: string;
   open_order_count: number;
   active_market_count: number;
 }

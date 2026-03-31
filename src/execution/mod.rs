@@ -22,11 +22,7 @@ pub struct ExecutionEngine {
 }
 
 impl ExecutionEngine {
-    pub fn new(
-        rest_client: KalshiRestClient,
-        db_pool: PgPool,
-        config: &StrategyConfig,
-    ) -> Self {
+    pub fn new(rest_client: KalshiRestClient, db_pool: PgPool, config: &StrategyConfig) -> Self {
         Self {
             rest_client,
             db_pool,
@@ -38,11 +34,7 @@ impl ExecutionEngine {
 
     /// Cancel all open orders (kill switch / shutdown).
     pub async fn cancel_all(&mut self, state: &StateEngine) {
-        let order_ids: Vec<String> = state
-            .open_orders()
-            .keys()
-            .cloned()
-            .collect();
+        let order_ids: Vec<String> = state.open_orders().keys().cloned().collect();
 
         if order_ids.is_empty() {
             return;
@@ -52,11 +44,7 @@ impl ExecutionEngine {
 
         // Batch cancel in groups of 20
         for chunk in order_ids.chunks(20) {
-            match self
-                .rest_client
-                .batch_cancel_orders(chunk.to_vec())
-                .await
-            {
+            match self.rest_client.batch_cancel_orders(chunk.to_vec()).await {
                 Ok(orders) => {
                     info!(cancelled = orders.len(), "Batch cancel success");
                 }
@@ -214,11 +202,7 @@ impl ExecutionEngine {
         if !cancels.is_empty() {
             debug!(count = cancels.len(), "Executing cancels");
             for chunk in cancels.chunks(20) {
-                if let Err(e) = self
-                    .rest_client
-                    .batch_cancel_orders(chunk.to_vec())
-                    .await
-                {
+                if let Err(e) = self.rest_client.batch_cancel_orders(chunk.to_vec()).await {
                     warn!(
                         error = %e,
                         count = chunk.len(),
@@ -252,10 +236,7 @@ impl ExecutionEngine {
                 .or(req.no_price_dollars.as_deref())
                 .and_then(|s| s.parse::<Decimal>().ok())
                 .unwrap_or(Decimal::ZERO);
-            let quantity = req
-                .count
-                .map(Decimal::from)
-                .unwrap_or(Decimal::ONE);
+            let quantity = req.count.map(Decimal::from).unwrap_or(Decimal::ONE);
 
             let desired_action = DesiredAction::CreateOrder {
                 market_ticker: ticker.clone(),

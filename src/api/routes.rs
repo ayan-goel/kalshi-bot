@@ -440,19 +440,135 @@ pub async fn get_balance(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-pub async fn get_pnl(State(state): State<AppState>) -> impl IntoResponse {
+#[derive(Deserialize)]
+pub struct PnlQuery {
+    #[serde(default)]
+    pub window: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PnlBreakdownResponse {
+    pnl: String,
+    realized_pnl: String,
+    unrealized_pnl: String,
+}
+
+#[derive(Serialize)]
+struct PnlComponentsResponse {
+    cash: String,
+    position_value: String,
+    equity: String,
+}
+
+#[derive(Serialize)]
+struct PnlSnapshotResponse {
+    ts: chrono::DateTime<chrono::Utc>,
+    realized_pnl: String,
+    unrealized_pnl: String,
+    balance: String,
+    portfolio_value: String,
+    equity: String,
+    session_pnl: String,
+    session_realized_pnl: String,
+    session_unrealized_pnl: String,
+    daily_pnl: String,
+    daily_realized_pnl: String,
+    daily_unrealized_pnl: String,
+    open_order_count: i32,
+    active_market_count: i32,
+}
+
+#[derive(Serialize)]
+struct PnlResponse {
+    window: String,
+    session_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    session: PnlBreakdownResponse,
+    daily: PnlBreakdownResponse,
+    components: PnlComponentsResponse,
+    snapshots: Vec<PnlSnapshotResponse>,
+    // Compatibility for existing clients expecting this top-level field.
+    daily_realized_pnl: String,
+}
+
+fn pnl_window_cutoff(window: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let now = chrono::Utc::now();
+    match window {
+        "30m" => Some(now - chrono::Duration::minutes(30)),
+        "1h" => Some(now - chrono::Duration::hours(1)),
+        "4h" => Some(now - chrono::Duration::hours(4)),
+        "1d" => Some(now - chrono::Duration::days(1)),
+        _ => None,
+    }
+}
+
+pub async fn get_pnl(
+    State(state): State<AppState>,
+    Query(q): Query<PnlQuery>,
+) -> impl IntoResponse {
+    let window = q.window.unwrap_or_else(|| "all".to_string()).to_lowercase();
+    let since = pnl_window_cutoff(&window);
+
     let engine = state.state_engine.read().await;
-    let daily_pnl = engine.daily_pnl();
+    let cash = engine.balance().available;
+    let position_value = engine.compute_portfolio_value();
+    let equity = cash + position_value;
+
+    let session_realized = engine.session_realized_pnl();
+    let session_unrealized = engine.session_unrealized_pnl();
+    let session_pnl = engine.session_total_pnl();
+
+    let daily_realized = engine.daily_realized_pnl();
+    let daily_unrealized = engine.daily_unrealized_pnl();
+    let daily_pnl = engine.daily_total_pnl();
+
+    let session_started_at = engine.session_started_at();
     drop(engine);
 
-    let snapshots = crate::db::get_pnl_snapshots(&state.db_pool, 500)
+    let snapshots = crate::db::get_pnl_snapshots(&state.db_pool, 2000, since)
         .await
         .unwrap_or_default();
 
-    Json(serde_json::json!({
-        "daily_realized_pnl": daily_pnl.to_string(),
-        "snapshots": snapshots,
-    }))
+    let snapshots: Vec<PnlSnapshotResponse> = snapshots
+        .into_iter()
+        .map(|s| PnlSnapshotResponse {
+            ts: s.ts,
+            realized_pnl: s.realized_pnl.to_string(),
+            unrealized_pnl: s.unrealized_pnl.to_string(),
+            balance: s.balance.to_string(),
+            portfolio_value: s.portfolio_value.to_string(),
+            equity: s.equity.to_string(),
+            session_pnl: s.session_pnl.to_string(),
+            session_realized_pnl: s.realized_pnl.to_string(),
+            session_unrealized_pnl: s.unrealized_pnl.to_string(),
+            daily_pnl: s.daily_pnl.to_string(),
+            daily_realized_pnl: s.daily_realized_pnl.to_string(),
+            daily_unrealized_pnl: s.daily_unrealized_pnl.to_string(),
+            open_order_count: s.open_order_count,
+            active_market_count: s.active_market_count,
+        })
+        .collect();
+
+    Json(PnlResponse {
+        window,
+        session_started_at,
+        session: PnlBreakdownResponse {
+            pnl: session_pnl.to_string(),
+            realized_pnl: session_realized.to_string(),
+            unrealized_pnl: session_unrealized.to_string(),
+        },
+        daily: PnlBreakdownResponse {
+            pnl: daily_pnl.to_string(),
+            realized_pnl: daily_realized.to_string(),
+            unrealized_pnl: daily_unrealized.to_string(),
+        },
+        components: PnlComponentsResponse {
+            cash: cash.to_string(),
+            position_value: position_value.to_string(),
+            equity: equity.to_string(),
+        },
+        snapshots,
+        daily_realized_pnl: daily_realized.to_string(),
+    })
 }
 
 #[derive(Deserialize)]

@@ -120,7 +120,9 @@ impl BotStateMachine {
 
         info!(from = %from, to = %target, trigger = %trigger, "Bot state transition");
 
-        let _ = self.persist_transition(from, target, trigger, details).await;
+        let _ = self
+            .persist_transition(from, target, trigger, details)
+            .await;
         Ok(())
     }
 

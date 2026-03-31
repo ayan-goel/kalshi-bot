@@ -39,19 +39,32 @@ fn make_ticker() -> MarketTicker {
 fn make_book(bid: Decimal, no_bid: Decimal, qty: Decimal) -> OrderBook {
     let mut book = OrderBook::new();
     book.apply_snapshot(
-        vec![PriceLevel { price: bid, quantity: qty }],
-        vec![PriceLevel { price: no_bid, quantity: qty }],
+        vec![PriceLevel {
+            price: bid,
+            quantity: qty,
+        }],
+        vec![PriceLevel {
+            price: no_bid,
+            quantity: qty,
+        }],
         1,
     );
     book
 }
 
 fn make_fv(price: Decimal, confidence: f64) -> FairValue {
-    FairValue { market_ticker: make_ticker(), price, confidence }
+    FairValue {
+        market_ticker: make_ticker(),
+        price,
+        confidence,
+    }
 }
 
 fn make_balance(available: Decimal) -> Balance {
-    Balance { available, portfolio_value: Decimal::ZERO }
+    Balance {
+        available,
+        portfolio_value: Decimal::ZERO,
+    }
 }
 
 fn make_meta() -> MarketMeta {
@@ -68,7 +81,15 @@ fn test_basic_quoting() {
     let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
     let fv = make_fv(dec!(0.50), 0.8);
     let quote = strategy()
-        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(dec!(1000)), 5)
+        .generate_quotes(
+            &make_ticker(),
+            &fv,
+            &book,
+            None,
+            Some(&make_meta()),
+            &make_balance(dec!(1000)),
+            5,
+        )
         .unwrap();
 
     assert!(quote.yes_bid.as_ref().unwrap().price < dec!(0.50));
@@ -82,8 +103,15 @@ fn test_spread_too_tight_returns_none() {
     // If market spread (0.02) < fee_half_spread * 2, strategy should not quote
     let book = make_book(dec!(0.49), dec!(0.51), dec!(100)); // spread = 0.02
     let fv = make_fv(dec!(0.50), 0.8);
-    let quote = strategy()
-        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(dec!(1000)), 5);
+    let quote = strategy().generate_quotes(
+        &make_ticker(),
+        &fv,
+        &book,
+        None,
+        Some(&make_meta()),
+        &make_balance(dec!(1000)),
+        5,
+    );
     assert!(quote.is_none(), "Spread too tight should return None");
 }
 
@@ -91,8 +119,15 @@ fn test_spread_too_tight_returns_none() {
 fn test_low_confidence_returns_none() {
     let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
     let fv = make_fv(dec!(0.50), 0.05); // below 0.1 threshold
-    let quote = strategy()
-        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(dec!(1000)), 5);
+    let quote = strategy().generate_quotes(
+        &make_ticker(),
+        &fv,
+        &book,
+        None,
+        Some(&make_meta()),
+        &make_balance(dec!(1000)),
+        5,
+    );
     assert!(quote.is_none(), "Low confidence should return None");
 }
 
@@ -104,7 +139,9 @@ fn test_inventory_skew_long_shifts_quotes_down() {
     let s = strategy();
     let meta = make_meta();
 
-    let neutral = s.generate_quotes(&make_ticker(), &fv, &book, None, Some(&meta), &bal, 5).unwrap();
+    let neutral = s
+        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&meta), &bal, 5)
+        .unwrap();
     let long_pos = Position {
         market_ticker: make_ticker(),
         yes_contracts: dec!(5),
@@ -114,11 +151,24 @@ fn test_inventory_skew_long_shifts_quotes_down() {
         realized_pnl: Decimal::ZERO,
         unrealized_pnl: Decimal::ZERO,
     };
-    let long = s.generate_quotes(&make_ticker(), &fv, &book, Some(&long_pos), Some(&meta), &bal, 5).unwrap();
+    let long = s
+        .generate_quotes(
+            &make_ticker(),
+            &fv,
+            &book,
+            Some(&long_pos),
+            Some(&meta),
+            &bal,
+            5,
+        )
+        .unwrap();
 
     let neutral_mid = (neutral.yes_bid.unwrap().price + neutral.yes_ask.unwrap().price) / dec!(2);
     let long_mid = (long.yes_bid.unwrap().price + long.yes_ask.unwrap().price) / dec!(2);
-    assert!(long_mid < neutral_mid, "Long inventory should shift quotes down: {long_mid} vs {neutral_mid}");
+    assert!(
+        long_mid < neutral_mid,
+        "Long inventory should shift quotes down: {long_mid} vs {neutral_mid}"
+    );
 }
 
 #[test]
@@ -129,7 +179,9 @@ fn test_inventory_skew_short_shifts_quotes_up() {
     let s = strategy();
     let meta = make_meta();
 
-    let neutral = s.generate_quotes(&make_ticker(), &fv, &book, None, Some(&meta), &bal, 5).unwrap();
+    let neutral = s
+        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&meta), &bal, 5)
+        .unwrap();
     let short_pos = Position {
         market_ticker: make_ticker(),
         yes_contracts: Decimal::ZERO,
@@ -139,11 +191,24 @@ fn test_inventory_skew_short_shifts_quotes_up() {
         realized_pnl: Decimal::ZERO,
         unrealized_pnl: Decimal::ZERO,
     };
-    let short = s.generate_quotes(&make_ticker(), &fv, &book, Some(&short_pos), Some(&meta), &bal, 5).unwrap();
+    let short = s
+        .generate_quotes(
+            &make_ticker(),
+            &fv,
+            &book,
+            Some(&short_pos),
+            Some(&meta),
+            &bal,
+            5,
+        )
+        .unwrap();
 
     let neutral_mid = (neutral.yes_bid.unwrap().price + neutral.yes_ask.unwrap().price) / dec!(2);
     let short_mid = (short.yes_bid.unwrap().price + short.yes_ask.unwrap().price) / dec!(2);
-    assert!(short_mid > neutral_mid, "Short inventory should shift quotes up: {short_mid} vs {neutral_mid}");
+    assert!(
+        short_mid > neutral_mid,
+        "Short inventory should shift quotes up: {short_mid} vs {neutral_mid}"
+    );
 }
 
 #[test]
@@ -151,17 +216,34 @@ fn test_zero_capital_returns_none() {
     // With zero available balance, compute_size should return None → generate_quotes returns None
     let book = make_book(dec!(0.45), dec!(0.45), dec!(100));
     let fv = make_fv(dec!(0.50), 0.8);
-    let quote = strategy()
-        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(Decimal::ZERO), 5);
-    assert!(quote.is_none(), "Zero capital should return None from generate_quotes");
+    let quote = strategy().generate_quotes(
+        &make_ticker(),
+        &fv,
+        &book,
+        None,
+        Some(&make_meta()),
+        &make_balance(Decimal::ZERO),
+        5,
+    );
+    assert!(
+        quote.is_none(),
+        "Zero capital should return None from generate_quotes"
+    );
 }
 
 #[test]
 fn test_empty_book_returns_none() {
     let book = OrderBook::new();
     let fv = make_fv(dec!(0.50), 0.8);
-    let quote = strategy()
-        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&make_meta()), &make_balance(dec!(1000)), 5);
+    let quote = strategy().generate_quotes(
+        &make_ticker(),
+        &fv,
+        &book,
+        None,
+        Some(&make_meta()),
+        &make_balance(dec!(1000)),
+        5,
+    );
     assert!(quote.is_none(), "Empty book should return None");
 }
 
@@ -171,7 +253,15 @@ fn test_bid_ask_within_tick_bounds() {
     let fv = make_fv(dec!(0.50), 0.8);
     let meta = make_meta(); // tick_min = 0.01, tick_max = 0.99
     let quote = strategy()
-        .generate_quotes(&make_ticker(), &fv, &book, None, Some(&meta), &make_balance(dec!(1000)), 5)
+        .generate_quotes(
+            &make_ticker(),
+            &fv,
+            &book,
+            None,
+            Some(&meta),
+            &make_balance(dec!(1000)),
+            5,
+        )
         .unwrap();
     let bid = quote.yes_bid.unwrap().price;
     let ask = quote.yes_ask.unwrap().price;
@@ -184,16 +274,33 @@ fn test_bid_ask_within_tick_bounds() {
 fn test_wider_book_spread_widens_quotes() {
     // Wider observable spread → vol_adj → wider quotes
     let narrow_book = make_book(dec!(0.47), dec!(0.47), dec!(100)); // spread 0.06
-    let wide_book = make_book(dec!(0.40), dec!(0.40), dec!(100));   // spread 0.20
+    let wide_book = make_book(dec!(0.40), dec!(0.40), dec!(100)); // spread 0.20
     let fv = make_fv(dec!(0.50), 0.8);
     let bal = make_balance(dec!(1000));
     let s = strategy();
     let meta = make_meta();
 
-    let narrow = s.generate_quotes(&make_ticker(), &fv, &narrow_book, None, Some(&meta), &bal, 5).unwrap();
-    let wide = s.generate_quotes(&make_ticker(), &fv, &wide_book, None, Some(&meta), &bal, 5).unwrap();
+    let narrow = s
+        .generate_quotes(
+            &make_ticker(),
+            &fv,
+            &narrow_book,
+            None,
+            Some(&meta),
+            &bal,
+            5,
+        )
+        .unwrap();
+    let wide = s
+        .generate_quotes(&make_ticker(), &fv, &wide_book, None, Some(&meta), &bal, 5)
+        .unwrap();
 
-    let narrow_half = (narrow.yes_ask.as_ref().unwrap().price - narrow.yes_bid.as_ref().unwrap().price) / dec!(2);
-    let wide_half = (wide.yes_ask.as_ref().unwrap().price - wide.yes_bid.as_ref().unwrap().price) / dec!(2);
-    assert!(wide_half > narrow_half, "Wider book should widen quotes: {wide_half} vs {narrow_half}");
+    let narrow_half =
+        (narrow.yes_ask.as_ref().unwrap().price - narrow.yes_bid.as_ref().unwrap().price) / dec!(2);
+    let wide_half =
+        (wide.yes_ask.as_ref().unwrap().price - wide.yes_bid.as_ref().unwrap().price) / dec!(2);
+    assert!(
+        wide_half > narrow_half,
+        "Wider book should widen quotes: {wide_half} vs {narrow_half}"
+    );
 }

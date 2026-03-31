@@ -27,7 +27,10 @@ fn normalize_pem(raw: &str) -> String {
 
     // Detect header line
     let (header, footer) = if s.contains("RSA PRIVATE KEY") {
-        ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----")
+        (
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----END RSA PRIVATE KEY-----",
+        )
     } else {
         ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----")
     };
@@ -97,13 +100,25 @@ impl KalshiAuth {
     pub fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
         let is_prod = config.environment == "production";
         let (api_key_var, pk_var, pk_b64_var) = if is_prod {
-            ("KALSHI_PROD_API_KEY", "KALSHI_PROD_PRIVATE_KEY", "KALSHI_PROD_PRIVATE_KEY_BASE64")
+            (
+                "KALSHI_PROD_API_KEY",
+                "KALSHI_PROD_PRIVATE_KEY",
+                "KALSHI_PROD_PRIVATE_KEY_BASE64",
+            )
         } else {
-            ("KALSHI_API_KEY", "KALSHI_PRIVATE_KEY", "KALSHI_PRIVATE_KEY_BASE64")
+            (
+                "KALSHI_API_KEY",
+                "KALSHI_PRIVATE_KEY",
+                "KALSHI_PRIVATE_KEY_BASE64",
+            )
         };
 
-        let api_key = std::env::var(api_key_var)
-            .with_context(|| format!("Missing env var {api_key_var} (environment: {})", config.environment))?;
+        let api_key = std::env::var(api_key_var).with_context(|| {
+            format!(
+                "Missing env var {api_key_var} (environment: {})",
+                config.environment
+            )
+        })?;
 
         if let Ok(raw_pem) = std::env::var(pk_var) {
             return Self::from_pem(api_key, &raw_pem);

@@ -1,7 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { usePnl } from "@/lib/hooks";
+import type { PnlWindow } from "@/lib/types";
+import {
+  latestPnlValue,
+  mapSnapshotsToChartPoints,
+  type PnlMode,
+} from "@/lib/pnl-utils";
 import {
   LineChart,
   Line,
@@ -13,72 +19,76 @@ import {
   Legend,
 } from "recharts";
 import { cn } from "@/lib/utils";
+type SeriesKey = "pnl" | "cash" | "equity";
 
-type Timeframe = "30m" | "1h" | "4h" | "1d" | "all";
-
-const TIMEFRAME_OPTIONS: { label: string; value: Timeframe; ms: number | null }[] = [
-  { label: "30m", value: "30m", ms: 30 * 60 * 1000 },
-  { label: "1h",  value: "1h",  ms: 60 * 60 * 1000 },
-  { label: "4h",  value: "4h",  ms: 4 * 60 * 60 * 1000 },
-  { label: "1d",  value: "1d",  ms: 24 * 60 * 60 * 1000 },
-  { label: "All", value: "all", ms: null },
+const WINDOW_OPTIONS: { label: string; value: PnlWindow }[] = [
+  { label: "30m", value: "30m" },
+  { label: "1h", value: "1h" },
+  { label: "4h", value: "4h" },
+  { label: "1d", value: "1d" },
+  { label: "All", value: "all" },
 ];
 
-export function PnlChart() {
-  const { data } = usePnl();
-  const [timeframe, setTimeframe] = useState<Timeframe>("1h");
+const MODE_OPTIONS: { label: string; value: PnlMode }[] = [
+  { label: "Session", value: "session" },
+  { label: "Daily", value: "daily" },
+];
 
-  if (!data?.snapshots?.length) {
-    return (
-      <div className="flex h-[280px] items-center justify-center text-zinc-600 text-sm">
-        No PnL data yet
-      </div>
-    );
+const SERIES_OPTIONS: { label: string; key: SeriesKey }[] = [
+  { label: "PnL", key: "pnl" },
+  { label: "Cash", key: "cash" },
+  { label: "Equity", key: "equity" },
+];
+
+function fmtUsd(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+function fmtXAxis(ts: number, window: PnlWindow): string {
+  const d = new Date(ts);
+  if (window === "1d" || window === "all") {
+    return d.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   }
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
-  // Reverse so oldest is left, newest is right
-  const ordered = [...data.snapshots].reverse();
-
-  // Filter to selected window
-  const windowMs = TIMEFRAME_OPTIONS.find((o) => o.value === timeframe)?.ms ?? null;
-  const cutoff = windowMs ? new Date(Date.now() - windowMs) : null;
-  const filtered = cutoff
-    ? ordered.filter((s) => new Date(s.ts) >= cutoff)
-    : ordered;
-
-  const chartData = filtered.map((s) => {
-    const equity = parseFloat(s.balance) + parseFloat(s.portfolio_value);
-    // PnL = realized fill cash flow + unrealized position mark-to-market.
-    // Both fields are correctly populated per-snapshot by the backend (post Bug 8/18 fix).
-    const pnl = parseFloat(s.realized_pnl) + parseFloat(s.unrealized_pnl);
-    return {
-      time: new Date(s.ts).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-      equity: parseFloat(equity.toFixed(4)),
-      pnl: parseFloat(pnl.toFixed(4)),
-      cash: parseFloat(parseFloat(s.balance).toFixed(4)),
-    };
+export function PnlChart() {
+  const [mode, setMode] = useState<PnlMode>("session");
+  const [window, setWindow] = useState<PnlWindow>("1h");
+  const [visible, setVisible] = useState<Record<SeriesKey, boolean>>({
+    pnl: true,
+    cash: true,
+    equity: true,
   });
+  const { data } = usePnl(window);
 
-  // Compute reasonable Y-axis tick count based on data density
-  const xTickInterval =
-    chartData.length <= 10 ? 0 :
-    chartData.length <= 30 ? Math.floor(chartData.length / 6) :
-    Math.floor(chartData.length / 8);
+  const chartData = useMemo(() => {
+    if (!data?.snapshots?.length) return [];
+    return mapSnapshotsToChartPoints(data.snapshots);
+  }, [data]);
+
+  const pnlLabel = mode === "session" ? "Session PnL" : "Daily PnL";
+  const latestPnl = latestPnlValue(chartData, mode);
+
+  const toggleSeries = (series: SeriesKey) => {
+    setVisible((prev) => ({ ...prev, [series]: !prev[series] }));
+  };
 
   return (
-    <div>
-      {/* Timeframe selector */}
-      <div className="flex items-center gap-1 mb-4">
-        {TIMEFRAME_OPTIONS.map((opt) => (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {MODE_OPTIONS.map((opt) => (
           <button
             key={opt.value}
-            onClick={() => setTimeframe(opt.value)}
+            onClick={() => setMode(opt.value)}
             className={cn(
               "px-2.5 py-1 rounded text-xs font-medium transition-colors",
-              timeframe === opt.value
+              mode === opt.value
                 ? "bg-zinc-700 text-zinc-100"
                 : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
             )}
@@ -88,71 +98,128 @@ export function PnlChart() {
         ))}
       </div>
 
+      <div className="flex flex-wrap items-center gap-1">
+        {WINDOW_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            onClick={() => setWindow(opt.value)}
+            className={cn(
+              "px-2.5 py-1 rounded text-xs font-medium transition-colors",
+              window === opt.value
+                ? "bg-zinc-700 text-zinc-100"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+            )}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        {SERIES_OPTIONS.map((series) => (
+          <button
+            key={series.key}
+            onClick={() => toggleSeries(series.key)}
+            className={cn(
+              "px-2 py-1 rounded border text-[11px] font-medium transition-colors",
+              visible[series.key]
+                ? "border-zinc-600 bg-zinc-800 text-zinc-200"
+                : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
+            )}
+          >
+            {series.label}
+          </button>
+        ))}
+      </div>
+
       {chartData.length === 0 ? (
         <div className="flex h-[280px] items-center justify-center text-zinc-600 text-sm">
           No data in the selected window
         </div>
       ) : (
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={chartData}>
-            <CartesianGrid stroke="#1e1e2e" strokeDasharray="none" />
-            <XAxis
-              dataKey="time"
-              tick={{ fontSize: 11, fill: "#52525b" }}
-              axisLine={{ stroke: "#1e1e2e" }}
-              tickLine={{ stroke: "#1e1e2e" }}
-              interval={xTickInterval}
-            />
-            <YAxis
-              tick={{ fontSize: 11, fill: "#52525b" }}
-              axisLine={{ stroke: "#1e1e2e" }}
-              tickLine={{ stroke: "#1e1e2e" }}
-              tickFormatter={(v) => `$${(v as number).toFixed(2)}`}
-              domain={["auto", "auto"]}
-              allowDataOverflow={false}
-            />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: "#111118",
-                border: "1px solid #1e1e2e",
-                borderRadius: "8px",
-                color: "#e4e4e7",
-                fontSize: "12px",
-              }}
-              formatter={(value, name) => [
-                typeof value === "number" ? `$${value.toFixed(4)}` : String(value),
-                name,
-              ]}
-            />
-            <Legend wrapperStyle={{ fontSize: "12px", color: "#71717a" }} />
-            <Line
-              type="monotone"
-              dataKey="equity"
-              stroke="#f59e0b"
-              name="Total Equity"
-              dot={false}
-              strokeWidth={2}
-            />
-            <Line
-              type="monotone"
-              dataKey="pnl"
-              stroke="#22c55e"
-              name="Realized + Unrealized PnL"
-              dot={false}
-              strokeWidth={1.5}
-              strokeDasharray="4 4"
-            />
-            <Line
-              type="monotone"
-              dataKey="cash"
-              stroke="#6366f1"
-              name="Cash"
-              dot={false}
-              strokeWidth={1}
-              opacity={0.6}
-            />
-          </LineChart>
-        </ResponsiveContainer>
+        <>
+          <p
+            className={cn(
+              "text-xs font-mono",
+              latestPnl >= 0 ? "text-emerald-400" : "text-red-400"
+            )}
+          >
+            {pnlLabel}: {latestPnl >= 0 ? "+" : ""}
+            {fmtUsd(latestPnl)}
+          </p>
+
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={chartData}>
+              <CartesianGrid stroke="#1e1e2e" strokeDasharray="none" />
+              <XAxis
+                dataKey="timestamp"
+                type="number"
+                domain={["dataMin", "dataMax"]}
+                tick={{ fontSize: 11, fill: "#52525b" }}
+                axisLine={{ stroke: "#1e1e2e" }}
+                tickLine={{ stroke: "#1e1e2e" }}
+                tickFormatter={(value) => fmtXAxis(Number(value), window)}
+                interval="preserveStartEnd"
+                minTickGap={26}
+              />
+              <YAxis
+                tick={{ fontSize: 11, fill: "#52525b" }}
+                axisLine={{ stroke: "#1e1e2e" }}
+                tickLine={{ stroke: "#1e1e2e" }}
+                tickFormatter={(v) => fmtUsd(Number(v))}
+                domain={["auto", "auto"]}
+                allowDataOverflow={false}
+              />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "#111118",
+                  border: "1px solid #1e1e2e",
+                  borderRadius: "8px",
+                  color: "#e4e4e7",
+                  fontSize: "12px",
+                }}
+                labelFormatter={(value) => fmtXAxis(Number(value), window)}
+                formatter={(value, name) => [
+                  typeof value === "number" ? fmtUsd(value) : String(value),
+                  name,
+                ]}
+              />
+              <Legend wrapperStyle={{ fontSize: "12px", color: "#71717a" }} />
+              {visible.equity && (
+                <Line
+                  type="monotone"
+                  dataKey="equity"
+                  stroke="#f59e0b"
+                  name="Total Equity"
+                  dot={false}
+                  strokeWidth={2}
+                />
+              )}
+              {visible.pnl && (
+                <Line
+                  type="monotone"
+                  dataKey={mode === "session" ? "sessionPnl" : "dailyPnl"}
+                  stroke="#22c55e"
+                  name={pnlLabel}
+                  dot={false}
+                  strokeWidth={1.8}
+                  strokeDasharray="4 4"
+                />
+              )}
+              {visible.cash && (
+                <Line
+                  type="monotone"
+                  dataKey="cash"
+                  stroke="#6366f1"
+                  name="Cash"
+                  dot={false}
+                  strokeWidth={1}
+                  opacity={0.65}
+                />
+              )}
+            </LineChart>
+          </ResponsiveContainer>
+        </>
       )}
     </div>
   );

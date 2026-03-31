@@ -100,16 +100,14 @@ impl MarketMakerStrategy {
 
         let fair = fv.price;
 
-        let inventory = position
-            .map(|p| p.net_inventory())
-            .unwrap_or(Decimal::ZERO);
+        let inventory = position.map(|p| p.net_inventory()).unwrap_or(Decimal::ZERO);
 
         // Inventory-based spread widening (configurable scale, was hardcoded 0.1)
         let inv_spread_adj = self.inventory_skew_coeff * inventory.abs() * self.inv_spread_scale;
 
         // Volatility widening (configurable baseline, was hardcoded 0.02)
-        let vol_adj = self.volatility_widen_coeff
-            * (spread - self.vol_baseline_spread).max(Decimal::ZERO);
+        let vol_adj =
+            self.volatility_widen_coeff * (spread - self.vol_baseline_spread).max(Decimal::ZERO);
 
         // Time-to-expiry widening
         let expiry_adj = self.compute_expiry_widening(meta);
@@ -182,8 +180,7 @@ impl MarketMakerStrategy {
 
         // Widen as expiry approaches: coeff / hours_remaining
         let widen = self.expiry_widen_coeff
-            * Decimal::from_f64_retain(1.0 / hours)
-                .unwrap_or(Decimal::ZERO);
+            * Decimal::from_f64_retain(1.0 / hours).unwrap_or(Decimal::ZERO);
         widen.min(dec!(0.10)) // cap at 10 cents extra
     }
 

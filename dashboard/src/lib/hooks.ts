@@ -1,9 +1,9 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef } from "react";
 import { api, getWsUrl } from "./api";
-import type { WsMessage } from "./types";
+import type { PnlWindow, WsMessage } from "./types";
 
 export function useStatus() {
   return useQuery({
@@ -21,10 +21,10 @@ export function useBalance() {
   });
 }
 
-export function usePnl() {
+export function usePnl(window: PnlWindow = "all") {
   return useQuery({
-    queryKey: ["pnl"],
-    queryFn: api.getPnl,
+    queryKey: ["pnl", window],
+    queryFn: () => api.getPnl(window),
     refetchInterval: 10000,
   });
 }
@@ -114,61 +114,69 @@ export function useBotWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
 
-  const connect = useCallback(() => {
-    const wsUrl = getWsUrl();
-    if (!wsUrl) return;
-    try {
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onmessage = (event) => {
-        try {
-          const msg: WsMessage = JSON.parse(event.data);
-          switch (msg.type) {
-            case "state_change":
-              queryClient.invalidateQueries({ queryKey: ["status"] });
-              break;
-            case "pnl_tick":
-              queryClient.invalidateQueries({ queryKey: ["balance"] });
-              queryClient.invalidateQueries({ queryKey: ["pnl"] });
-              break;
-            case "fill":
-              queryClient.invalidateQueries({ queryKey: ["fills"] });
-              queryClient.invalidateQueries({ queryKey: ["positions"] });
-              queryClient.invalidateQueries({ queryKey: ["balance"] });
-              break;
-            case "order_update":
-              queryClient.invalidateQueries({ queryKey: ["orders"] });
-              break;
-            case "risk_event":
-              queryClient.invalidateQueries({ queryKey: ["riskEvents"] });
-              break;
-            case "config_change":
-              queryClient.invalidateQueries({ queryKey: ["config"] });
-              break;
-          }
-        } catch {
-          // ignore parse errors
-        }
-      };
-
-      ws.onclose = () => {
-        reconnectTimer.current = setTimeout(connect, 3000);
-      };
-
-      ws.onerror = () => {
-        ws.close();
-      };
-    } catch {
-      reconnectTimer.current = setTimeout(connect, 3000);
-    }
-  }, [queryClient]);
-
   useEffect(() => {
+    const connect = () => {
+      const wsUrl = getWsUrl();
+      if (!wsUrl) return;
+      try {
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          // Immediate sync so dashboards opened mid-session instantly reflect
+          // an already-running bot without waiting for polling intervals.
+          queryClient.invalidateQueries({ queryKey: ["status"] });
+          queryClient.invalidateQueries({ queryKey: ["balance"] });
+          queryClient.invalidateQueries({ queryKey: ["pnl"] });
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg: WsMessage = JSON.parse(event.data);
+            switch (msg.type) {
+              case "state_change":
+                queryClient.invalidateQueries({ queryKey: ["status"] });
+                break;
+              case "pnl_tick":
+                queryClient.invalidateQueries({ queryKey: ["balance"] });
+                queryClient.invalidateQueries({ queryKey: ["pnl"] });
+                break;
+              case "fill":
+                queryClient.invalidateQueries({ queryKey: ["fills"] });
+                queryClient.invalidateQueries({ queryKey: ["positions"] });
+                queryClient.invalidateQueries({ queryKey: ["balance"] });
+                break;
+              case "order_update":
+                queryClient.invalidateQueries({ queryKey: ["orders"] });
+                break;
+              case "risk_event":
+                queryClient.invalidateQueries({ queryKey: ["riskEvents"] });
+                break;
+              case "config_change":
+                queryClient.invalidateQueries({ queryKey: ["config"] });
+                break;
+            }
+          } catch {
+            // ignore parse errors
+          }
+        };
+
+        ws.onclose = () => {
+          reconnectTimer.current = setTimeout(connect, 3000);
+        };
+
+        ws.onerror = () => {
+          ws.close();
+        };
+      } catch {
+        reconnectTimer.current = setTimeout(connect, 3000);
+      }
+    };
+
     connect();
     return () => {
       wsRef.current?.close();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     };
-  }, [connect]);
+  }, [queryClient]);
 }

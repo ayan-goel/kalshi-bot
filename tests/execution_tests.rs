@@ -33,7 +33,10 @@ fn make_order(price: Decimal, qty: Decimal) -> LiveOrder {
 }
 
 fn make_target(price: Decimal, qty: Decimal) -> PriceLevel {
-    PriceLevel { price, quantity: qty }
+    PriceLevel {
+        price,
+        quantity: qty,
+    }
 }
 
 #[test]
