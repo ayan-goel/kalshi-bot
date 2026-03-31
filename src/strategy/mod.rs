@@ -8,14 +8,17 @@ use crate::orderbook::OrderBook;
 use crate::state::MarketMeta;
 use crate::types::*;
 
-/// Inventory-aware, fee-aware market-making strategy.
+const LEVEL_SIZE_WEIGHTS: [f64; 5] = [1.0, 0.6, 0.4, 0.3, 0.2];
+
+/// Inventory-aware, fee-aware, multi-level market-making strategy.
 ///
 /// For each market:
 /// 1. Compute fee-aware minimum half-spread
 /// 2. Add inventory spread widening + volatility widening + expiry widening
-/// 3. Inventory skew shifts both quotes
-/// 4. Tick-size snapping from market metadata
-/// 5. Capital-aware sizing
+/// 3. Generate multiple quote levels with increasing spread and decreasing size
+/// 4. Inventory skew shifts all quotes
+/// 5. Tick-size snapping from market metadata
+/// 6. Capital-aware sizing
 pub struct MarketMakerStrategy {
     base_half_spread: Decimal,
     min_edge_after_fees: Decimal,
@@ -28,6 +31,8 @@ pub struct MarketMakerStrategy {
     vol_baseline_spread: Decimal,
     expiry_widen_coeff: Decimal,
     expiry_widen_threshold_hours: f64,
+    num_levels: u32,
+    level_spread_increment: Decimal,
 }
 
 impl MarketMakerStrategy {
@@ -44,6 +49,8 @@ impl MarketMakerStrategy {
             vol_baseline_spread: config.vol_baseline_spread,
             expiry_widen_coeff: config.expiry_widen_coeff,
             expiry_widen_threshold_hours: config.expiry_widen_threshold_hours,
+            num_levels: config.num_levels.max(1),
+            level_spread_increment: config.level_spread_increment,
         }
     }
 
@@ -68,21 +75,17 @@ impl MarketMakerStrategy {
 
         let spread = book.spread().unwrap_or(Decimal::ONE);
 
-        // Tick bounds from metadata (needed for fee estimation below)
         let (tick_size, tick_min, tick_max) = match meta {
             Some(m) => (m.tick_size, m.tick_min, m.tick_max),
             None => (dec!(0.01), dec!(0.01), dec!(0.99)),
         };
 
-        // Bug 12: compute fee floor using approximated bid/ask prices rather than
-        // fair value so the floor is accurate at extreme mids (near 0 or 1).
         let bid_estimate = (fv.price - self.base_half_spread).max(tick_min);
         let ask_estimate = (fv.price + self.base_half_spread).min(tick_max);
         let fee_per_side = (maker_fee(bid_estimate) + maker_fee(ask_estimate)) / dec!(2);
         let fee_half_spread = fee_per_side + self.min_edge_after_fees;
         let effective_base = self.base_half_spread.max(fee_half_spread);
 
-        // Check if observable spread can cover fees
         if spread < fee_half_spread * dec!(2) {
             debug!(
                 market = %ticker,
@@ -99,71 +102,91 @@ impl MarketMakerStrategy {
         }
 
         let fair = fv.price;
-
         let inventory = position.map(|p| p.net_inventory()).unwrap_or(Decimal::ZERO);
 
-        // Inventory-based spread widening (configurable scale, was hardcoded 0.1)
         let inv_spread_adj = self.inventory_skew_coeff * inventory.abs() * self.inv_spread_scale;
-
-        // Volatility widening (configurable baseline, was hardcoded 0.02)
         let vol_adj =
             self.volatility_widen_coeff * (spread - self.vol_baseline_spread).max(Decimal::ZERO);
-
-        // Time-to-expiry widening
         let expiry_adj = self.compute_expiry_widening(meta);
 
-        let total_half_spread = effective_base + inv_spread_adj + vol_adj + expiry_adj;
+        let base_total_half_spread = effective_base + inv_spread_adj + vol_adj + expiry_adj;
 
-        let mut bid_price = fair - total_half_spread;
-        let mut ask_price = fair + total_half_spread;
-
-        // Inventory skew (configurable scale, was hardcoded 0.01)
         let skew = -self.inventory_skew_coeff * inventory * self.inv_skew_scale;
-        bid_price += skew;
-        ask_price += skew;
 
-        // Tick-size snapping (tick_size/tick_min/tick_max already set above)
-        bid_price = snap_down(bid_price, tick_size);
-        ask_price = snap_up(ask_price, tick_size);
+        let total_capital_for_sizing = self.compute_total_capital_budget(balance, max_markets);
 
-        bid_price = bid_price.max(tick_min);
-        ask_price = ask_price.min(tick_max);
+        let mut yes_bids: Vec<PriceLevel> = Vec::new();
+        let mut yes_asks: Vec<PriceLevel> = Vec::new();
+        let mut capital_used = Decimal::ZERO;
 
-        if ask_price <= bid_price {
-            ask_price = bid_price + tick_size;
-            if ask_price > tick_max {
-                return None;
+        for level in 0..self.num_levels {
+            let level_extra = self.level_spread_increment * Decimal::from(level);
+            let half_spread = base_total_half_spread + level_extra;
+
+            let mut bid_price = fair - half_spread + skew;
+            let mut ask_price = fair + half_spread + skew;
+
+            bid_price = snap_down(bid_price, tick_size);
+            ask_price = snap_up(ask_price, tick_size);
+
+            bid_price = bid_price.max(tick_min);
+            ask_price = ask_price.min(tick_max);
+
+            if ask_price <= bid_price {
+                ask_price = bid_price + tick_size;
+                if ask_price > tick_max {
+                    break;
+                }
             }
+
+            let size_weight = LEVEL_SIZE_WEIGHTS
+                .get(level as usize)
+                .copied()
+                .unwrap_or(0.2);
+            let qty = self.compute_level_size(
+                fv,
+                size_weight,
+                bid_price,
+                total_capital_for_sizing,
+                &mut capital_used,
+            );
+
+            let qty = match qty {
+                Some(q) => q,
+                None => break,
+            };
+
+            yes_bids.push(PriceLevel {
+                price: bid_price,
+                quantity: qty,
+            });
+            yes_asks.push(PriceLevel {
+                price: ask_price,
+                quantity: qty,
+            });
         }
 
-        // Capital-aware sizing — Bug 9: return None when capital allows zero contracts
-        let qty = self.compute_size(fv, balance, max_markets, bid_price)?;
+        if yes_bids.is_empty() {
+            return None;
+        }
 
         debug!(
             market = %ticker,
             fair = %fair,
-            bid = %bid_price,
-            ask = %ask_price,
-            qty = %qty,
+            levels = yes_bids.len(),
             inventory = %inventory,
             fee_hs = %fee_half_spread,
             expiry_adj = %expiry_adj,
-            "Quotes generated"
+            "Multi-level quotes generated"
         );
 
         Some(TargetQuote {
             market_ticker: ticker.clone(),
-            yes_bid: Some(PriceLevel {
-                price: bid_price,
-                quantity: qty,
-            }),
-            yes_ask: Some(PriceLevel {
-                price: ask_price,
-                quantity: qty,
-            }),
+            yes_bids,
+            yes_asks,
             reason: format!(
-                "fair={fair} spread={spread} inv={inventory} conf={:.2} fee_hs={fee_half_spread}",
-                fv.confidence
+                "fair={fair} spread={spread} inv={inventory} conf={:.2} fee_hs={fee_half_spread} lvls={}",
+                fv.confidence, self.num_levels
             ),
         })
     }
@@ -178,41 +201,48 @@ impl MarketMakerStrategy {
             return Decimal::ZERO;
         }
 
-        // Widen as expiry approaches: coeff / hours_remaining
         let widen = self.expiry_widen_coeff
             * Decimal::from_f64_retain(1.0 / hours).unwrap_or(Decimal::ZERO);
-        widen.min(dec!(0.10)) // cap at 10 cents extra
+        widen.min(dec!(0.10))
     }
 
-    fn compute_size(
+    fn compute_total_capital_budget(&self, balance: &Balance, max_markets: u32) -> Decimal {
+        let markets = Decimal::from(max_markets.max(1));
+        balance.available / markets
+    }
+
+    fn compute_level_size(
         &self,
         fv: &FairValue,
-        balance: &Balance,
-        max_markets: u32,
+        size_weight: f64,
         bid_price: Decimal,
+        capital_budget: Decimal,
+        capital_used: &mut Decimal,
     ) -> Option<Decimal> {
         let confidence_factor = Decimal::try_from(fv.confidence).unwrap_or(dec!(0.5));
-        let base_qty = (self.default_order_size * confidence_factor)
+        let weight = Decimal::try_from(size_weight).unwrap_or(dec!(1));
+        let base_qty = (self.default_order_size * confidence_factor * weight)
             .max(Decimal::ONE)
             .min(self.max_order_size);
 
-        // Capital-aware: don't commit more than balance / max_markets per market
-        let markets = Decimal::from(max_markets.max(1));
-        let capital_per_market = balance.available / markets;
+        let remaining_capital = capital_budget - *capital_used;
+        if remaining_capital <= Decimal::ZERO {
+            return None;
+        }
+
         let max_by_capital = if bid_price > Decimal::ZERO {
-            (capital_per_market / bid_price).floor()
+            (remaining_capital / bid_price).floor()
         } else {
             self.max_order_size
         };
 
-        // Bug 9: if the capital cap allows zero contracts, don't force a 1-contract order
-        // that would exceed the per-market capital budget.
         let qty = base_qty.min(max_by_capital).round_dp(0);
         if qty.is_zero() {
-            None
-        } else {
-            Some(qty)
+            return None;
         }
+
+        *capital_used += qty * bid_price;
+        Some(qty)
     }
 }
 

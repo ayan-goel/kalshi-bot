@@ -120,8 +120,8 @@ async fn main() -> Result<()> {
             engine.roll_daily_context(chrono::Utc::now());
 
             let available = engine.balance().available;
-            let portfolio_value = engine.compute_portfolio_value();
-            let equity = available + portfolio_value;
+            let portfolio_value = engine.balance().portfolio_value;
+            let equity = engine.current_equity();
 
             let session_realized = engine.session_realized_pnl();
             let session_unrealized = engine.session_unrealized_pnl();
@@ -1006,14 +1006,15 @@ fn compute_target_quotes(
         if let Some(mut target) = target {
             let mult = event_detector.spread_multiplier(ticker);
             if mult > rust_decimal::Decimal::ONE {
-                if let (Some(ref mut bid), Some(ref mut ask)) =
-                    (&mut target.yes_bid, &mut target.yes_ask)
-                {
-                    let mid = (bid.price + ask.price) / rust_decimal::Decimal::TWO;
-                    let half = (ask.price - bid.price) / rust_decimal::Decimal::TWO;
+                let level_count = target.yes_bids.len().min(target.yes_asks.len());
+                for i in 0..level_count {
+                    let mid = (target.yes_bids[i].price + target.yes_asks[i].price)
+                        / rust_decimal::Decimal::TWO;
+                    let half = (target.yes_asks[i].price - target.yes_bids[i].price)
+                        / rust_decimal::Decimal::TWO;
                     let widened_half = half * mult;
-                    bid.price = mid - widened_half;
-                    ask.price = mid + widened_half;
+                    target.yes_bids[i].price = mid - widened_half;
+                    target.yes_asks[i].price = mid + widened_half;
                 }
             }
 

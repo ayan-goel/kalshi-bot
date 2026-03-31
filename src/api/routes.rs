@@ -429,9 +429,7 @@ pub async fn get_positions(State(state): State<AppState>) -> impl IntoResponse {
 pub async fn get_balance(State(state): State<AppState>) -> impl IntoResponse {
     let engine = state.state_engine.read().await;
     let available = engine.balance().available;
-    // portfolio_value is computed from live positions × mid-prices
-    // (not from Kalshi's /portfolio/balance which doesn't include it)
-    let portfolio_value = engine.compute_portfolio_value();
+    let portfolio_value = engine.balance().portfolio_value;
     let total_reserved = engine.total_reserved();
     Json(serde_json::json!({
         "available": available.to_string(),
@@ -508,8 +506,8 @@ pub async fn get_pnl(
 
     let engine = state.state_engine.read().await;
     let cash = engine.balance().available;
-    let position_value = engine.compute_portfolio_value();
-    let equity = cash + position_value;
+    let position_value = engine.balance().portfolio_value;
+    let equity = engine.current_equity();
 
     let session_realized = engine.session_realized_pnl();
     let session_unrealized = engine.session_unrealized_pnl();

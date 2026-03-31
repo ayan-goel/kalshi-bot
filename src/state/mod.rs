@@ -228,7 +228,7 @@ impl StateEngine {
     }
 
     pub fn current_equity(&self) -> Decimal {
-        self.balance.available + self.compute_portfolio_value()
+        self.balance.available + self.balance.portfolio_value
     }
 
     pub fn session_total_pnl(&self) -> Decimal {
@@ -311,22 +311,18 @@ impl StateEngine {
         self.market_meta.len()
     }
 
-    /// Compute portfolio value as the sum of all position values at current mid-prices.
-    ///
-    /// YES contracts are worth `yes_contracts × mid`.
-    /// NO contracts are worth `no_contracts × (1 − mid)`.
-    /// Falls back to $0 for positions without a live book.
+    /// Mid-price portfolio estimate for quoting/strategy use only.
+    /// NOT used for equity or PnL — those use `balance.portfolio_value` from Kalshi's API.
     pub fn compute_portfolio_value(&self) -> rust_decimal::Decimal {
         use rust_decimal::Decimal;
         self.positions
             .iter()
             .map(|(ticker, pos)| {
-                // Use a sensible fallback: if no book, assume 50¢ mid
                 let mid = self
                     .books
                     .get(ticker)
                     .and_then(|b| b.mid())
-                    .unwrap_or_else(|| rust_decimal_macros::dec!(0.50));
+                    .unwrap_or(Decimal::ZERO);
                 pos.yes_contracts * mid + pos.no_contracts * (Decimal::ONE - mid)
             })
             .sum()
@@ -549,15 +545,14 @@ impl StateEngine {
                     "Fill received"
                 );
 
-                // Bug 8: accumulate daily/session realized P&L from fill cash flow minus fees.
-                // Buys spend cash (negative), sells receive cash (positive).
                 self.roll_daily_context(ts);
-                let pnl_contribution = match action {
+                let cash_delta = match action {
                     Action::Buy => -(price * count) - fee,
                     Action::Sell => (price * count) - fee,
                 };
-                self.session_realized_pnl += pnl_contribution;
-                self.daily_realized_pnl += pnl_contribution;
+                self.session_realized_pnl += cash_delta;
+                self.daily_realized_pnl += cash_delta;
+                self.balance.available += cash_delta;
 
                 let pos = self
                     .positions

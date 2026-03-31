@@ -179,42 +179,46 @@ impl RiskEngine {
     }
 
     /// Check a target quote before it's converted to orders.
-    /// Rejects inverted spreads, fat-finger deviations, and expired markets.
+    /// Validates all levels: inverted spreads, fat-finger deviations, and expired markets.
     pub fn check_target_quote(
         &self,
         quote: &TargetQuote,
         state: &StateEngine,
         fair_price: Option<Decimal>,
     ) -> RiskDecision {
-        // Inverted spread check
-        if let (Some(bid), Some(ask)) = (&quote.yes_bid, &quote.yes_ask) {
-            if ask.price <= bid.price {
+        // Inverted spread check: each level's ask must exceed the corresponding bid
+        let check_len = quote.yes_bids.len().min(quote.yes_asks.len());
+        for i in 0..check_len {
+            if quote.yes_asks[i].price <= quote.yes_bids[i].price {
                 return RiskDecision::Rejected {
-                    reason: format!("Inverted spread: bid={} >= ask={}", bid.price, ask.price),
+                    reason: format!(
+                        "Inverted spread at level {}: bid={} >= ask={}",
+                        i, quote.yes_bids[i].price, quote.yes_asks[i].price
+                    ),
                 };
             }
         }
 
-        // Fat-finger: reject if quote deviates too far from fair value
+        // Fat-finger: reject if any level deviates too far from fair value
         if let Some(fair) = fair_price {
-            if let Some(bid) = &quote.yes_bid {
+            for (i, bid) in quote.yes_bids.iter().enumerate() {
                 let dev = (bid.price - fair).abs();
                 if dev > self.max_fair_deviation {
                     return RiskDecision::Rejected {
                         reason: format!(
-                            "Bid {:.4} deviates {:.4} from fair {:.4} (limit {:.4})",
-                            bid.price, dev, fair, self.max_fair_deviation
+                            "Bid level {} price {:.4} deviates {:.4} from fair {:.4} (limit {:.4})",
+                            i, bid.price, dev, fair, self.max_fair_deviation
                         ),
                     };
                 }
             }
-            if let Some(ask) = &quote.yes_ask {
+            for (i, ask) in quote.yes_asks.iter().enumerate() {
                 let dev = (ask.price - fair).abs();
                 if dev > self.max_fair_deviation {
                     return RiskDecision::Rejected {
                         reason: format!(
-                            "Ask {:.4} deviates {:.4} from fair {:.4} (limit {:.4})",
-                            ask.price, dev, fair, self.max_fair_deviation
+                            "Ask level {} price {:.4} deviates {:.4} from fair {:.4} (limit {:.4})",
+                            i, ask.price, dev, fair, self.max_fair_deviation
                         ),
                     };
                 }

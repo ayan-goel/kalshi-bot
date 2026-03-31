@@ -11,7 +11,7 @@ use crate::config::AppConfig;
 use crate::exchange::models::{WsMessage, WsSubscribeCommand, WsSubscribeParams};
 use crate::types::{Action, ExchangeEvent, MarketTicker, OrderStatus, Side};
 
-const MAX_RECONNECT_DELAY_SECS: u64 = 30;
+const MAX_RECONNECT_DELAY_SECS: u64 = 5;
 
 pub async fn run_websocket(
     config: AppConfig,

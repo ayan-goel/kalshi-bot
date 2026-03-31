@@ -146,6 +146,10 @@ pub struct StrategyConfig {
     pub event_threshold: Decimal,
     #[serde(default = "default_event_decay_secs")]
     pub event_decay_seconds: u64,
+    #[serde(default = "default_num_levels")]
+    pub num_levels: u32,
+    #[serde(default = "default_level_spread_increment")]
+    pub level_spread_increment: Decimal,
 }
 
 fn default_inv_spread_scale() -> Decimal {
@@ -172,6 +176,12 @@ fn default_event_threshold() -> Decimal {
 fn default_event_decay_secs() -> u64 {
     30
 }
+fn default_num_levels() -> u32 {
+    3
+}
+fn default_level_spread_increment() -> Decimal {
+    Decimal::new(1, 2)
+} // 0.01
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RiskConfig {

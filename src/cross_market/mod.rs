@@ -99,14 +99,11 @@ impl CrossMarketChecker {
                 let q = &mut adjusted[idx];
 
                 if excess > Decimal::ZERO {
-                    // Both markets together are "overpriced" vs 1.0 sum
-                    // → widen each ask slightly
-                    if let Some(ref mut ask) = q.yes_ask {
+                    for ask in q.yes_asks.iter_mut() {
                         ask.price += shift;
                     }
                 } else {
-                    // Sum < 1.0: "underpriced" → tighten each bid slightly
-                    if let Some(ref mut bid) = q.yes_bid {
+                    for bid in q.yes_bids.iter_mut() {
                         bid.price += shift;
                     }
                 }

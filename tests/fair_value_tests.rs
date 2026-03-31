@@ -29,6 +29,8 @@ fn make_config() -> StrategyConfig {
         event_half_spread_multiplier: dec!(3),
         event_threshold: dec!(0.05),
         event_decay_seconds: 30,
+        num_levels: 3,
+        level_spread_increment: dec!(0.01),
     }
 }
 

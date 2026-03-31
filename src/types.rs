@@ -179,12 +179,12 @@ pub enum DesiredAction {
     },
 }
 
-/// Output of the strategy: what quotes we want live
+/// Output of the strategy: what quotes we want live (multi-level)
 #[derive(Debug, Clone)]
 pub struct TargetQuote {
     pub market_ticker: MarketTicker,
-    pub yes_bid: Option<PriceLevel>,
-    pub yes_ask: Option<PriceLevel>,
+    pub yes_bids: Vec<PriceLevel>,
+    pub yes_asks: Vec<PriceLevel>,
     pub reason: String,
 }
 
