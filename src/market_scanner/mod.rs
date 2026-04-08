@@ -43,8 +43,13 @@ impl MarketScanner {
         }
     }
 
-    /// Scan all open markets and return scored, ranked results.
-    pub async fn scan(&self, rest_client: &KalshiRestClient) -> Result<Vec<ScoredMarket>> {
+    /// Scan all open markets and return scored results alongside the raw market data.
+    /// Returns `(scored, raw_markets)` — callers can use raw_markets to build metadata
+    /// without a second round-trip to the exchange.
+    pub async fn scan(
+        &self,
+        rest_client: &KalshiRestClient,
+    ) -> Result<(Vec<ScoredMarket>, Vec<MarketResponse>)> {
         info!("Scanning all open markets...");
         let markets = rest_client
             .get_all_markets(Some("open"), None, None)
@@ -53,8 +58,8 @@ impl MarketScanner {
 
         let now = Utc::now();
         let mut scored: Vec<ScoredMarket> = markets
-            .into_iter()
-            .map(|m| self.score_market(&m, &now))
+            .iter()
+            .map(|m| self.score_market(m, &now))
             .collect();
 
         scored.sort_by(|a, b| {
@@ -70,21 +75,27 @@ impl MarketScanner {
             "Market scan complete"
         );
 
-        Ok(scored)
+        Ok((scored, markets))
     }
 
     /// Select the top N markets that pass filters.
+    /// Returns `(selected_tickers, all_scored, raw_market_data)`.
+    /// The raw market data is returned so callers can build metadata without a second fetch.
     pub async fn select_markets(
         &self,
         rest_client: &KalshiRestClient,
         max_markets: usize,
         existing_allowlist: &[String],
-    ) -> Result<(Vec<String>, Vec<ScoredMarket>)> {
+    ) -> Result<(Vec<String>, Vec<ScoredMarket>, Vec<MarketResponse>)> {
         if !existing_allowlist.is_empty() {
             info!(
                 count = existing_allowlist.len(),
-                "Using explicit markets_allowlist, skipping scanner"
+                "Using explicit markets_allowlist, fetching metadata"
             );
+            let raw_markets = rest_client
+                .get_all_markets(Some("open"), None, None)
+                .await
+                .unwrap_or_default();
             let scored: Vec<ScoredMarket> = existing_allowlist
                 .iter()
                 .map(|t| ScoredMarket {
@@ -105,10 +116,10 @@ impl MarketScanner {
                 .take(max_markets)
                 .cloned()
                 .collect();
-            return Ok((tickers, scored));
+            return Ok((tickers, scored, raw_markets));
         }
 
-        let all_scored = self.scan(rest_client).await?;
+        let (all_scored, raw_markets) = self.scan(rest_client).await?;
         let selected: Vec<String> = all_scored
             .iter()
             .filter(|s| s.reject_reason.is_none())
@@ -140,7 +151,7 @@ impl MarketScanner {
             );
         }
 
-        Ok((selected, all_scored))
+        Ok((selected, all_scored, raw_markets))
     }
 
     fn score_market(&self, market: &MarketResponse, now: &DateTime<Utc>) -> ScoredMarket {

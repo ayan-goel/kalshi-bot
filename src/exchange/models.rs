@@ -112,6 +112,16 @@ pub struct OrderbookDataFp {
     pub no_dollars: Option<Vec<Vec<String>>>,
 }
 
+/// PRICE UNIT CONVENTION (verified against Kalshi API):
+///
+/// All `*_dollars` fields (yes_price_dollars, no_price_dollars) use FRACTIONAL DOLLARS
+/// in the range [0.01, 0.99], serialized as a string, e.g. "0.4700" for 47¢.
+///
+/// The legacy `yes_price` / `no_price` fields use INTEGER CENTS (e.g. 47 for 47¢).
+/// Kalshi's API accepts both. This codebase uses the `*_dollars` fields exclusively.
+///
+/// Strategy prices are computed as Decimal in [0, 1] — this maps directly to the
+/// `*_dollars` format via `format!("{:.4}", level.price)`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateOrderRequest {
     pub ticker: String,
@@ -127,8 +137,10 @@ pub struct CreateOrderRequest {
     pub yes_price: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_price: Option<i64>,
+    /// Price in fractional dollars, e.g. "0.4700" = 47¢. Range: [0.01, 0.99].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub yes_price_dollars: Option<String>,
+    /// Price in fractional dollars, e.g. "0.4700" = 47¢. Range: [0.01, 0.99].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_price_dollars: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

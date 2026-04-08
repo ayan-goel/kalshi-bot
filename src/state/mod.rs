@@ -250,6 +250,10 @@ impl StateEngine {
         self.daily_total_pnl() - self.daily_realized_pnl()
     }
 
+    pub fn daily_start_equity(&self) -> Decimal {
+        self.daily_start_equity
+    }
+
     pub fn disconnected_at(&self) -> Option<DateTime<Utc>> {
         self.disconnected_at
     }
@@ -318,10 +322,23 @@ impl StateEngine {
         &self.books
     }
 
-    /// Number of scanner-selected markets (those with loaded metadata).
-    /// Does NOT count books created incidentally from WS events for other tickers.
+    /// Number of markets that are both subscribed (have a book) AND have loaded metadata.
+    /// This is the true count of markets being quoted in the current tick.
     pub fn active_market_count(&self) -> usize {
-        self.market_meta.len()
+        self.books
+            .keys()
+            .filter(|t| self.market_meta.contains_key(t))
+            .count()
+    }
+
+    /// Clear books, metadata, orders, and event groups at the start of a new trading session.
+    /// Leaves positions and balance intact for reconcile_startup to reload.
+    pub fn clear_books_and_meta(&mut self) {
+        self.books.clear();
+        self.market_meta.clear();
+        self.open_orders.clear();
+        self.event_groups.clear();
+        self.recent_trades.clear();
     }
 
     /// Mid-price portfolio estimate for quoting/strategy use only.
@@ -559,13 +576,6 @@ impl StateEngine {
                 );
 
                 self.roll_daily_context(ts);
-                let cash_delta = match action {
-                    Action::Buy => -(price * count) - fee,
-                    Action::Sell => (price * count) - fee,
-                };
-                self.session_realized_pnl += cash_delta;
-                self.daily_realized_pnl += cash_delta;
-                self.balance.available += cash_delta;
 
                 let pos = self
                     .positions
@@ -580,12 +590,143 @@ impl StateEngine {
                         unrealized_pnl: Decimal::ZERO,
                     });
 
-                match (side, action) {
-                    (Side::Yes, Action::Buy) => pos.yes_contracts += count,
-                    (Side::Yes, Action::Sell) => pos.yes_contracts -= count,
-                    (Side::No, Action::Buy) => pos.no_contracts += count,
-                    (Side::No, Action::Sell) => pos.no_contracts -= count,
-                }
+                // Compute realized PnL, handling position flips (long→short, short→long).
+                //
+                // Rules:
+                //  - Buying while long (or flat): update avg cost, no realized PnL (only -fee).
+                //  - Buying while short: realize (short_entry - buy_price) * covering_qty - fee.
+                //    If the buy exceeds the short, the excess opens a new long.
+                //  - Selling while long: realize (sell_price - long_entry) * closing_qty - fee.
+                //    If the sell exceeds the long, the excess opens a new short.
+                //  - Selling while short (or flat): update short avg, no realized PnL (only -fee).
+                let realized = match (side, action) {
+                    (Side::Yes, Action::Buy) => {
+                        let prev_qty = pos.yes_contracts;
+                        let pnl = if prev_qty < Decimal::ZERO {
+                            // Covering a short YES position.
+                            let covering = prev_qty.abs().min(count);
+                            let short_avg = pos.avg_yes_price.unwrap_or(price);
+                            (short_avg - price) * covering - fee
+                        } else {
+                            -fee // opening or adding to a long — no realized PnL
+                        };
+
+                        pos.yes_contracts += count;
+                        let new_qty = pos.yes_contracts;
+
+                        if new_qty > Decimal::ZERO {
+                            if prev_qty >= Decimal::ZERO {
+                                // Stayed long: update weighted avg cost basis.
+                                let avg = pos.avg_yes_price.unwrap_or(price);
+                                pos.avg_yes_price = Some(
+                                    (avg * prev_qty + price * count) / new_qty,
+                                );
+                            } else {
+                                // Flipped from short to long: avg is the new buy price.
+                                pos.avg_yes_price = Some(price);
+                            }
+                        } else if new_qty == Decimal::ZERO {
+                            pos.avg_yes_price = None;
+                        }
+                        // If still short (new_qty < 0), avg stays as the original short entry.
+
+                        pnl
+                    }
+                    (Side::Yes, Action::Sell) => {
+                        let prev_qty = pos.yes_contracts;
+                        let pnl = if prev_qty > Decimal::ZERO {
+                            // Closing / reducing a long YES position.
+                            let closing = prev_qty.min(count);
+                            let long_avg = pos.avg_yes_price.unwrap_or(price);
+                            (price - long_avg) * closing - fee
+                        } else {
+                            -fee // opening or adding to a short — no realized PnL
+                        };
+
+                        pos.yes_contracts -= count;
+                        let new_qty = pos.yes_contracts;
+
+                        if new_qty < Decimal::ZERO {
+                            if prev_qty <= Decimal::ZERO {
+                                // Stayed short: update weighted avg short entry.
+                                let abs_prev = prev_qty.abs();
+                                let avg = pos.avg_yes_price.unwrap_or(price);
+                                pos.avg_yes_price = Some(
+                                    (avg * abs_prev + price * count) / new_qty.abs(),
+                                );
+                            } else {
+                                // Flipped from long to short: avg is the new sell price.
+                                pos.avg_yes_price = Some(price);
+                            }
+                        } else if new_qty == Decimal::ZERO {
+                            pos.avg_yes_price = None;
+                        }
+                        // If still long (new_qty > 0), avg stays as the original long entry.
+
+                        pnl
+                    }
+                    (Side::No, Action::Buy) => {
+                        let prev_qty = pos.no_contracts;
+                        let pnl = if prev_qty < Decimal::ZERO {
+                            let covering = prev_qty.abs().min(count);
+                            let short_avg = pos.avg_no_price.unwrap_or(price);
+                            (short_avg - price) * covering - fee
+                        } else {
+                            -fee
+                        };
+
+                        pos.no_contracts += count;
+                        let new_qty = pos.no_contracts;
+
+                        if new_qty > Decimal::ZERO {
+                            if prev_qty >= Decimal::ZERO {
+                                let avg = pos.avg_no_price.unwrap_or(price);
+                                pos.avg_no_price = Some(
+                                    (avg * prev_qty + price * count) / new_qty,
+                                );
+                            } else {
+                                pos.avg_no_price = Some(price);
+                            }
+                        } else if new_qty == Decimal::ZERO {
+                            pos.avg_no_price = None;
+                        }
+
+                        pnl
+                    }
+                    (Side::No, Action::Sell) => {
+                        let prev_qty = pos.no_contracts;
+                        let pnl = if prev_qty > Decimal::ZERO {
+                            let closing = prev_qty.min(count);
+                            let long_avg = pos.avg_no_price.unwrap_or(price);
+                            (price - long_avg) * closing - fee
+                        } else {
+                            -fee
+                        };
+
+                        pos.no_contracts -= count;
+                        let new_qty = pos.no_contracts;
+
+                        if new_qty < Decimal::ZERO {
+                            if prev_qty <= Decimal::ZERO {
+                                let abs_prev = prev_qty.abs();
+                                let avg = pos.avg_no_price.unwrap_or(price);
+                                pos.avg_no_price = Some(
+                                    (avg * abs_prev + price * count) / new_qty.abs(),
+                                );
+                            } else {
+                                pos.avg_no_price = Some(price);
+                            }
+                        } else if new_qty == Decimal::ZERO {
+                            pos.avg_no_price = None;
+                        }
+
+                        pnl
+                    }
+                };
+
+                self.session_realized_pnl += realized;
+                self.daily_realized_pnl += realized;
+                pos.realized_pnl += realized;
 
                 let _ = crate::db::insert_fill(
                     &self.db_pool,

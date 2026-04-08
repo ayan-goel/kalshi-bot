@@ -474,6 +474,13 @@ async fn run_trading_loop(
 ) {
     let cfg = config.read().await.clone();
 
+    // Clear stale books and metadata from any previous session before reconciling.
+    // Positions and balance are intentionally kept so reconcile_startup can reload them.
+    {
+        let mut engine = state_engine.write().await;
+        engine.clear_books_and_meta();
+    }
+
     let rest_client = match create_rest_client(&cfg) {
         Ok(c) => c,
         Err(e) => {
@@ -594,8 +601,6 @@ async fn run_trading_loop(
     let mut order_sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(120));
     order_sync_tick.tick().await;
 
-    let max_markets = cfg.trading.max_markets_active;
-
     let mut skip_markets: std::collections::HashSet<types::MarketTicker> =
         std::collections::HashSet::new();
     let mut market_failures: std::collections::HashMap<types::MarketTicker, u32> =
@@ -630,29 +635,8 @@ async fn run_trading_loop(
                 break;
             }
             _ = order_sync_tick.tick() => {
-                match rest_client.get_balance().await {
-                    Ok(bal) => {
-                        let mut engine = state_engine.write().await;
-                        tracing::debug!(available = %bal.available, "Balance refreshed");
-                        engine.set_balance(bal);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Balance refresh failed");
-                    }
-                }
-
-                match rest_client.get_positions().await {
-                    Ok(positions) => {
-                        let mut engine = state_engine.write().await;
-                        for pos in positions {
-                            engine.upsert_position(pos);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Position sync failed");
-                    }
-                }
-
+                // Balance and positions are synced by the process-level data-sync task
+                // every 120 seconds. This tick only prunes stale open orders.
                 match rest_client.get_orders(Some("resting")).await {
                     Ok(live_orders) => {
                         let live_ids: std::collections::HashSet<String> =
@@ -683,44 +667,61 @@ async fn run_trading_loop(
                 tracing::info!("Periodic market rescan triggered");
                 let cfg = config.read().await;
                 if cfg.trading.markets_allowlist.is_empty() {
+                    let live_max_markets = cfg.trading.max_markets_active as usize;
                     let scanner = market_scanner::MarketScanner::new(&cfg.trading);
                     match scanner.select_markets(
                         &rest_client,
-                        max_markets as usize,
+                        live_max_markets,
                         &cfg.trading.markets_allowlist,
                     ).await {
-                        Ok((new_tickers, scored)) => {
+                        Ok((new_tickers, scored, all_market_data)) => {
+                            // select_markets already fetched the full market list — reuse it.
+                            let market_data_map: std::collections::HashMap<&str, &exchange::models::MarketResponse> =
+                                all_market_data.iter().map(|m| (m.ticker.as_str(), m)).collect();
+
+                            let new_set: std::collections::HashSet<String> =
+                                new_tickers.iter().cloned().collect();
+
                             let mut engine = state_engine.write().await;
-                            let mut new_markets = Vec::new();
+
+                            // Prune markets that dropped out of the top-N desired set.
+                            let to_remove: Vec<types::MarketTicker> = engine
+                                .market_meta_map()
+                                .keys()
+                                .filter(|t| !new_set.contains(&t.0))
+                                .cloned()
+                                .collect();
+                            for ticker in &to_remove {
+                                engine.remove_market(ticker);
+                                tracing::info!(ticker = %ticker, "Pruned market dropped from top-N");
+                            }
+
+                            // Add markets not yet in the active set.
+                            let mut changed = !to_remove.is_empty();
                             for ticker in &new_tickers {
                                 let mt = types::MarketTicker::from(ticker.as_str());
                                 if engine.get_book(&mt).is_none() {
                                     engine.ensure_book(mt.clone());
-                                    if let Some(sm) = scored.iter().find(|s| s.ticker == *ticker) {
-                                        match rest_client.get_markets(None, Some(1)).await {
-                                            Ok(markets) => {
-                                                if let Some(m) = markets.into_iter().find(|m| m.ticker == *ticker) {
-                                                    let meta = state::MarketMeta::from_market_response(&m, sm.score);
-                                                    engine.set_market_meta(mt, meta);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, ticker = %ticker, "Failed to fetch market metadata during rescan");
-                                            }
-                                        }
+                                    let score = scored.iter()
+                                        .find(|s| s.ticker == *ticker)
+                                        .map(|s| s.score)
+                                        .unwrap_or(0.0);
+                                    if let Some(m) = market_data_map.get(ticker.as_str()) {
+                                        let meta = state::MarketMeta::from_market_response(m, score);
+                                        engine.set_market_meta(mt, meta);
+                                    } else {
+                                        tracing::warn!(ticker = %ticker, "No market data found during rescan — metadata missing");
                                     }
-                                    new_markets.push(ticker.clone());
                                     tracing::info!(ticker = %ticker, "New market added from rescan");
+                                    changed = true;
                                 }
                             }
-                            drop(engine);
 
-                            // Subscribe the WS to new markets
-                            if !new_markets.is_empty() {
-                                let all_tickers: Vec<String> = {
-                                    let engine = state_engine.read().await;
-                                    engine.books().keys().map(|k| k.0.clone()).collect()
-                                };
+                            // Re-sync WS subscriptions if the active set changed.
+                            if changed {
+                                let all_tickers: Vec<String> =
+                                    engine.books().keys().map(|k| k.0.clone()).collect();
+                                drop(engine);
                                 let _ = ws_cmd_tx
                                     .send(exchange::websocket::WsCommand::SubscribeMarkets(all_tickers))
                                     .await;
@@ -737,6 +738,8 @@ async fn run_trading_loop(
                 if !cfg.trading_enabled() {
                     continue;
                 }
+                // Read live max_markets so config changes take effect without restart.
+                let max_markets = cfg.trading.max_markets_active;
                 drop(cfg);
 
                 let engine = state_engine.read().await;
@@ -813,10 +816,19 @@ async fn run_trading_loop(
                 drop(engine);
 
                 let engine = state_engine.read().await;
-                let failed_markets = execution_engine
+                let (failed_markets, succeeded_markets) = execution_engine
                     .reconcile(&engine, &target_quotes, &risk_engine)
                     .await;
                 drop(engine);
+
+                // Reset failure counter for markets with successful creates this tick.
+                // This unblacklists markets that had transient errors.
+                for market in succeeded_markets {
+                    if market_failures.remove(&market).is_some() {
+                        skip_markets.remove(&market);
+                        tracing::info!(market = %market, "Market removed from blacklist after successful order");
+                    }
+                }
 
                 for market in failed_markets {
                     let count = market_failures.entry(market.clone()).or_insert(0);
@@ -841,14 +853,41 @@ fn create_rest_client(config: &config::AppConfig) -> Result<exchange::rest::Kals
     exchange::rest::KalshiRestClient::new(config)
 }
 
+/// Retry an async fallible operation up to `max_attempts` times with exponential backoff.
+async fn retry_exchange<T, F, Fut>(label: &str, max_attempts: u32, op: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut delay = tokio::time::Duration::from_secs(2);
+    for attempt in 1..=max_attempts {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < max_attempts => {
+                tracing::warn!(
+                    label = label,
+                    attempt = attempt,
+                    max = max_attempts,
+                    delay_secs = delay.as_secs(),
+                    error = %e,
+                    "Exchange call failed, retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(tokio::time::Duration::from_secs(30));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
 async fn reconcile_startup(
     rest_client: &exchange::rest::KalshiRestClient,
     state_engine: &api::SharedState,
     config: &config::AppConfig,
 ) -> Result<()> {
     tracing::info!("Step 1/4: Fetching account balance...");
-    let balance = rest_client
-        .get_balance()
+    let balance = retry_exchange("get_balance", 3, || rest_client.get_balance())
         .await
         .context("reconcile step 1: get_balance failed")?;
     tracing::info!(
@@ -861,8 +900,7 @@ async fn reconcile_startup(
     engine.set_balance(balance);
 
     tracing::info!("Step 2/4: Fetching open orders...");
-    let open_orders = rest_client
-        .get_orders(Some("resting"))
+    let open_orders = retry_exchange("get_orders", 3, || rest_client.get_orders(Some("resting")))
         .await
         .context("reconcile step 2: get_orders failed")?;
     tracing::info!(count = open_orders.len(), "Reconciled open orders");
@@ -871,8 +909,7 @@ async fn reconcile_startup(
     }
 
     tracing::info!("Step 3/4: Fetching positions...");
-    let positions = rest_client
-        .get_positions()
+    let positions = retry_exchange("get_positions", 3, || rest_client.get_positions())
         .await
         .context("reconcile step 3: get_positions failed")?;
     tracing::info!(count = positions.len(), "Reconciled positions");
@@ -883,16 +920,12 @@ async fn reconcile_startup(
     tracing::info!("Step 4/4: Selecting target markets via scanner...");
     let max_markets = config.trading.max_markets_active.max(1) as usize;
     let scanner = market_scanner::MarketScanner::new(&config.trading);
-    let (selected_tickers, all_scored) = scanner
+    let (selected_tickers, all_scored, all_market_data) = scanner
         .select_markets(rest_client, max_markets, &config.trading.markets_allowlist)
         .await
         .context("reconcile step 4: market scanning failed")?;
 
-    let all_market_data = rest_client
-        .get_all_markets(Some("open"), None, None)
-        .await
-        .unwrap_or_default();
-
+    // select_markets already fetched the full market list — reuse it.
     let market_data_map: std::collections::HashMap<&str, &exchange::models::MarketResponse> =
         all_market_data
             .iter()
@@ -1023,7 +1056,7 @@ fn compute_target_quotes(
         let meta = match meta {
             Some(m) => m,
             None => {
-                tracing::debug!(market = %ticker, "Skipping market: no metadata loaded");
+                tracing::warn!(market = %ticker, "Skipping market with book but no metadata — book data wasted, check rescan");
                 continue;
             }
         };

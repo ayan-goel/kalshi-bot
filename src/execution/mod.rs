@@ -70,14 +70,17 @@ impl ExecutionEngine {
     }
 
     /// Reconcile target quotes with live orders: cancel stale, create missing, update changed.
-    /// Returns the set of markets that returned `invalid_order` so the caller can blacklist them.
+    /// Returns `(failed_markets, succeeded_markets)` where:
+    /// - `failed_markets`: markets that returned `invalid_order` (caller may blacklist)
+    /// - `succeeded_markets`: markets that had at least one successful order create this tick
     pub async fn reconcile(
         &mut self,
         state: &StateEngine,
         targets: &[TargetQuote],
         risk_engine: &RiskEngine,
-    ) -> Vec<MarketTicker> {
+    ) -> (Vec<MarketTicker>, Vec<MarketTicker>) {
         let mut invalid_order_markets: Vec<MarketTicker> = Vec::new();
+        let mut succeeded_markets: Vec<MarketTicker> = Vec::new();
         let mut desired: HashMap<MarketTicker, &TargetQuote> = HashMap::new();
         for target in targets {
             desired.insert(target.market_ticker.clone(), target);
@@ -254,7 +257,10 @@ impl ExecutionEngine {
                         count = ?req.count,
                         "Order created"
                     );
-                    self.last_action_time.insert(ticker, Instant::now());
+                    self.last_action_time.insert(ticker.clone(), Instant::now());
+                    if !succeeded_markets.contains(&ticker) {
+                        succeeded_markets.push(ticker);
+                    }
                 }
                 Err(e) => {
                     let err_str = format!("{e:?}");
@@ -274,7 +280,7 @@ impl ExecutionEngine {
             }
         }
 
-        invalid_order_markets
+        (invalid_order_markets, succeeded_markets)
     }
 
     /// Multi-level reconciliation: match live orders to target levels by closest price,

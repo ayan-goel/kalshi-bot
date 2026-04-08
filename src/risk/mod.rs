@@ -53,7 +53,11 @@ impl RiskEngine {
             }
         }
 
-        if state.daily_total_pnl() < -self.max_loss_daily {
+        // Skip daily-loss check until the equity baseline has been established.
+        // daily_start_equity is 0 at boot before the first REST balance sync completes.
+        if state.daily_start_equity() > Decimal::ZERO
+            && state.daily_total_pnl() < -self.max_loss_daily
+        {
             return Some(format!(
                 "Daily loss {} exceeds limit {}",
                 state.daily_total_pnl(),

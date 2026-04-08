@@ -7,22 +7,23 @@ use crate::orderbook::OrderBook;
 use crate::state::MarketMeta;
 use crate::types::{FairValue, MarketTicker, Position};
 
-/// Fair value engine V2: microstructure + trade flow + time-to-expiry.
+/// Fair value engine V2: microstructure + trade flow.
 ///
 /// Formula:
 ///   raw_fair = microprice
 ///            + a1 * order_imbalance
 ///            + a2 * recent_trade_sign
-///            + inventory_adj (-k1*inv - k3*inv^3)
 ///
 ///   fair = clamp(raw_fair, tick_min, tick_max)
+///
+/// Inventory adjustment is intentionally NOT applied here.
+/// It belongs solely in the strategy layer (MarketMakerStrategy) as an asymmetric
+/// quote skew. Applying it here caused double-counting and drifted quotes.
 ///
 /// Confidence combines spread, volume, staleness, and trade flow.
 pub struct FairValueEngine {
     order_imbalance_alpha: Decimal,
     trade_sign_alpha: Decimal,
-    inventory_penalty_k1: Decimal,
-    inventory_penalty_k3: Decimal,
 }
 
 impl FairValueEngine {
@@ -30,8 +31,6 @@ impl FairValueEngine {
         Self {
             order_imbalance_alpha: config.order_imbalance_alpha,
             trade_sign_alpha: config.trade_sign_alpha,
-            inventory_penalty_k1: config.inventory_penalty_k1,
-            inventory_penalty_k3: config.inventory_penalty_k3,
         }
     }
 
@@ -40,7 +39,7 @@ impl FairValueEngine {
         &self,
         ticker: &MarketTicker,
         book: &OrderBook,
-        position: Option<&Position>,
+        _position: Option<&Position>,
         trade_sign: Decimal,
         meta: Option<&MarketMeta>,
     ) -> Option<FairValue> {
@@ -54,12 +53,7 @@ impl FairValueEngine {
         let imbalance_adj = self.order_imbalance_alpha * imbalance;
         let trade_sign_adj = self.trade_sign_alpha * trade_sign;
 
-        let inventory = position.map(|p| p.net_inventory()).unwrap_or(Decimal::ZERO);
-
-        let inv_adj = -self.inventory_penalty_k1 * inventory
-            - self.inventory_penalty_k3 * inventory * inventory * inventory;
-
-        let raw_fair = microprice + imbalance_adj + trade_sign_adj + inv_adj;
+        let raw_fair = microprice + imbalance_adj + trade_sign_adj;
 
         let (min_price, max_price) = match meta {
             Some(m) => (m.tick_min, m.tick_max),
@@ -74,7 +68,6 @@ impl FairValueEngine {
             microprice = %microprice,
             imbalance = %imbalance,
             trade_sign = %trade_sign,
-            inventory = %inventory,
             fair = %fair,
             confidence = confidence,
             "Fair value computed"

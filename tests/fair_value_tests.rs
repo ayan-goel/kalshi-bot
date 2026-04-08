@@ -85,9 +85,11 @@ fn test_fair_value_no_inventory_no_imbalance() {
 }
 
 #[test]
-fn test_fair_value_long_inventory_depresses_price() {
+fn test_fair_value_independent_of_long_inventory() {
+    // Inventory adjustment was removed from FairValueEngine (BUG-11 fix).
+    // Fair value should equal microprice + signals regardless of position size.
     let book = midpoint_book();
-    let pos = Position {
+    let pos_large = Position {
         market_ticker: make_ticker(),
         yes_contracts: dec!(10),
         no_contracts: Decimal::ZERO,
@@ -96,49 +98,41 @@ fn test_fair_value_long_inventory_depresses_price() {
         realized_pnl: Decimal::ZERO,
         unrealized_pnl: Decimal::ZERO,
     };
-    let fv = engine()
-        .compute(&make_ticker(), &book, Some(&pos), Decimal::ZERO, None)
+    let fv_large = engine()
+        .compute(&make_ticker(), &book, Some(&pos_large), Decimal::ZERO, None)
         .unwrap();
-    // raw = 0.50 + (-0.03*10) + (-0.001*1000) = 0.50 - 0.30 - 1.00 → clamped to 0.01
-    assert_eq!(fv.price, dec!(0.01));
+
+    let fv_flat = engine()
+        .compute(&make_ticker(), &book, None, Decimal::ZERO, None)
+        .unwrap();
+
+    // Fair value is the same regardless of inventory — skew belongs in the strategy.
+    assert_eq!(fv_large.price, fv_flat.price);
+    assert_eq!(fv_flat.price, dec!(0.50));
 }
 
 #[test]
-fn test_fair_value_small_long_inventory() {
+fn test_fair_value_independent_of_short_inventory() {
     let book = midpoint_book();
-    let pos = Position {
-        market_ticker: make_ticker(),
-        yes_contracts: dec!(2),
-        no_contracts: Decimal::ZERO,
-        avg_yes_price: None,
-        avg_no_price: None,
-        realized_pnl: Decimal::ZERO,
-        unrealized_pnl: Decimal::ZERO,
-    };
-    let fv = engine()
-        .compute(&make_ticker(), &book, Some(&pos), Decimal::ZERO, None)
-        .unwrap();
-    // raw = 0.50 + (-0.03*2) + (-0.001*8) = 0.50 - 0.06 - 0.008 = 0.432
-    assert_eq!(fv.price, dec!(0.432));
-}
-
-#[test]
-fn test_fair_value_short_inventory_raises_price() {
-    let book = midpoint_book();
-    let pos = Position {
+    let pos_short = Position {
         market_ticker: make_ticker(),
         yes_contracts: Decimal::ZERO,
-        no_contracts: dec!(2),
+        no_contracts: dec!(5),
         avg_yes_price: None,
         avg_no_price: None,
         realized_pnl: Decimal::ZERO,
         unrealized_pnl: Decimal::ZERO,
     };
-    let fv = engine()
-        .compute(&make_ticker(), &book, Some(&pos), Decimal::ZERO, None)
+    let fv_short = engine()
+        .compute(&make_ticker(), &book, Some(&pos_short), Decimal::ZERO, None)
         .unwrap();
-    // net inventory = -2, raw = 0.50 + (0.03*2) + (0.001*8) = 0.568
-    assert_eq!(fv.price, dec!(0.568));
+
+    let fv_flat = engine()
+        .compute(&make_ticker(), &book, None, Decimal::ZERO, None)
+        .unwrap();
+
+    assert_eq!(fv_short.price, fv_flat.price);
+    assert_eq!(fv_flat.price, dec!(0.50));
 }
 
 #[test]
